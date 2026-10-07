@@ -46,6 +46,8 @@ def _backpressure_defer_seconds() -> int:
     return get_config().backpressure_defer_seconds
 
 
+from .stage import StageHolder, bind_holder
+
 # How a lost append race backs off. An append that loses is told "the document moved, read it
 # again"; the writer that won is normally done within seconds, so the first redo is quick, and the
 # delay doubles (jittered, so simultaneous losers don't line up and collide again) up to a ceiling
@@ -61,8 +63,6 @@ def _append_conflict_defer_seconds(defer_count: int) -> float:
     delay = _APPEND_CONFLICT_DEFER_BASE_SECONDS * (2 ** max(0, defer_count - 1))
     return min(delay, _APPEND_CONFLICT_DEFER_MAX_SECONDS) * random.uniform(0.5, 1.5)
 
-
-from .stage import StageHolder, bind_holder
 
 # Map DB operation_type -> metric `operation` label, collapsing the retain
 # variants onto "retain" so async worker completions land on the same
@@ -877,7 +877,9 @@ class WorkerPoller:
         for operation_id in task.all_operation_ids:
             await self._mark_failed(operation_id, error_message, task.schema)
 
-    async def _defer_all(self, task: ClaimedTask, exec_date, reason: str, metadata: dict | None = None) -> None:
+    async def _defer_all(
+        self, task: ClaimedTask, exec_date, reason: str, metadata: dict[str, Any] | None = None
+    ) -> None:
         for operation_id in task.all_operation_ids:
             await self._defer_operation(operation_id, exec_date, reason, task.schema, metadata)
 
@@ -1088,7 +1090,7 @@ class WorkerPoller:
         exec_date: "Any",
         reason: str,
         schema: str | None,
-        metadata: dict | None = None,
+        metadata: dict[str, Any] | None = None,
     ):
         """Reset task to pending for re-pickup at exec_date without counting as a retry.
 

@@ -60,6 +60,8 @@ async def test_a_burst_of_appends_to_one_document_loses_nothing(client, bank_id,
     await settled(bank_id)
 
     queued_results = results[: len(QUEUED_TURNS)]
+    sync_results = results[len(QUEUED_TURNS) :]
+
     assert not [r for r in queued_results if isinstance(r, BaseException)], (
         f"a queued append was rejected outright: {queued_results}"
     )
@@ -67,14 +69,19 @@ async def test_a_burst_of_appends_to_one_document_loses_nothing(client, bank_id,
         status = await client.operations.get_operation_status(bank_id, response.operation_id)
         assert status.status == "completed", f"{status.status}: {status.error_message}"
 
-    # Every queued turn is in the document. A synchronous append may still be told
-    # the document moved — it has no queue to be re-run from — so those are only
-    # required to be all-or-nothing, never half-applied.
+    # The document is asserted whole, not by substring: appends concatenate with a newline, so the
+    # set of lines is exactly the set of turns that landed. Only their ORDER is unpinnable here —
+    # the burst decides who commits first — which is why this compares sorted lines rather than
+    # the joined text. A substring check would miss both a duplicated turn and a lost one that
+    # some other turn's text happens to contain.
+    #
+    # A synchronous append may still be told the document moved: it has no queue to be re-run
+    # from, so the caller owns the retry. Those are required to be all-or-nothing — the ones that
+    # reported success are in, the ones that raised wrote nothing.
     document = await client.documents.get_document(bank_id, DOCUMENT_ID)
-    text = document.original_text or ""
-    assert text.startswith(FIRST)
-    for turn in QUEUED_TURNS:
-        assert turn in text, f"queued turn lost: {turn}\n{text}"
-    for turn, result in zip(SYNC_TURNS, results[len(QUEUED_TURNS) :]):
-        if not isinstance(result, BaseException):
-            assert turn in text, f"a synchronous append reported success but its turn is missing: {turn}\n{text}"
+    landed = sorted((document.original_text or "").split("\n"))
+    expected = sorted(
+        [FIRST, *QUEUED_TURNS, *[t for t, r in zip(SYNC_TURNS, sync_results) if not isinstance(r, BaseException)]]
+    )
+
+    assert landed == expected

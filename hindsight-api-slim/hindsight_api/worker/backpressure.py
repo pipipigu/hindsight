@@ -1,4 +1,9 @@
-"""Recognising a store that is asking for the write to come back later.
+"""Recognising a write the worker should bring back later rather than fail.
+
+Two shapes of that answer live here: a store shedding under its own indexing backlog
+(`is_store_backpressure`) and an append that lost the race on the document it extends
+(`is_append_conflict`). Neither says anything about the payload, and both clear on their own, so
+both are deferred instead of counting against the operation's retries.
 
 A store under sustained ingest can refuse a write because its own indexing has fallen behind —
 not because the request is bad, not because anything is broken, and not in a way that says
@@ -61,6 +66,8 @@ def is_append_conflict(exc: BaseException) -> bool:
     wrapped by the time the worker sees it. Matched on the exception type here, not the message:
     unlike the store's gRPC refusal, both of these are our own classes.
     """
+    # Imported here, not at module scope: the worker is imported by `worker.main` before the
+    # engine is, and pulling the engine package in from this module would invert that order.
     from ..engine.memories.base import StoreWriteConflict
     from ..engine.retain.types import ConcurrentAppendConflict
 
