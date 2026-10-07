@@ -48,3 +48,27 @@ def is_store_backpressure(exc: BaseException) -> bool:
             return True
         cur = cur.__cause__ or cur.__context__
     return False
+
+
+def is_append_conflict(exc: BaseException) -> bool:
+    """Is `exc` an append that lost its race on the document it extends?
+
+    A lost race is the opposite of a fatal error: the precondition rejects the write whole, so
+    nothing was stored, and redoing it on a fresh read is always safe. Failing it terminally —
+    which is what the worker does with any other exception — drops the turn it carried.
+
+    Walks the cause/context chain like `is_store_backpressure`, since the conflict is usually
+    wrapped by the time the worker sees it. Matched on the exception type here, not the message:
+    unlike the store's gRPC refusal, both of these are our own classes.
+    """
+    from ..engine.memories.base import StoreWriteConflict
+    from ..engine.retain.types import ConcurrentAppendConflict
+
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, (ConcurrentAppendConflict, StoreWriteConflict)):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
