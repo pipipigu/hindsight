@@ -35,6 +35,23 @@ vi.mock("./config", async (importOriginal) => {
 const listPagesOk = async () => ({ items: [{ id: "p1", name: "Component map" }] });
 
 describe("buildSessionStartContext", () => {
+  it("does not fetch an unused page roster alongside registry recall", async () => {
+    const client = {
+      listDocumentIds: vi.fn(async () => new Set<string>()),
+      listPages: vi.fn(async () => ({ items: [{ id: "p", name: "Page" }] })),
+    };
+    const out = await buildSessionStartContext({
+      cwd: "/repo",
+      bankId: "mapped",
+      harness: "dsh",
+      cfg: resolveConfig({ bankResolution: "registry", autoSeed: false, autoInject: "recall" }),
+      client,
+    });
+    expect(client.listPages).not.toHaveBeenCalled();
+    expect(client.listDocumentIds).not.toHaveBeenCalled();
+    expect(out.additionalContext).toBeUndefined();
+    expect(out.systemMessage).toContain("mapped");
+  });
   it("warns in the user-visible banner when the old Claude Code plugin is still active", async () => {
     const client = { listDocumentIds: async () => new Set(["git:a"]), listPages: listPagesOk };
     const detectLegacyPlugin = vi.fn().mockReturnValue("hindsight-memory@hindsight");

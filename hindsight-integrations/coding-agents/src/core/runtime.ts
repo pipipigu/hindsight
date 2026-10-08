@@ -243,6 +243,7 @@ export class RuntimeCore {
       cfg: this.cfg,
       client: this.client,
       cacheFile,
+      sessionId,
     });
 
     const blocks: string[] = [];

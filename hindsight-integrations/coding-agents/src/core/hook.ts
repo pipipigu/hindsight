@@ -30,6 +30,8 @@ import { describeError, log, setLogLevel } from "./log";
 import { startBackgroundSeed } from "./seed";
 import type { ClientOpts } from "./hindsight";
 import { HindsightClient, ReflectError } from "./hindsight";
+import type { RecallFact } from "./recall-evidence";
+import { sanitizeSharedText } from "./shared-sanitize";
 import { brandWord } from "./brand";
 import {
   buildReflectQuery,
@@ -87,6 +89,11 @@ interface HookClient {
     opts?: { limit?: number; timeoutMs?: number }
   ): Promise<{ id: string; name: string; snippet: string }[]>;
   recallObservations(query: string, opts: { timeoutMs: number }): Promise<string[]>;
+  recallCandidates?(
+    query: string,
+    opts: { timeoutMs: number; signal?: AbortSignal }
+  ): Promise<RecallFact[]>;
+  getPage?(pageId: string, opts: { timeoutMs: number; signal?: AbortSignal }): Promise<unknown>;
   knowledgePagesSupported?: boolean;
   /** Recorded on reflect failures so the diag trail says which bank to look at server-side. */
   readonly bank?: string;
@@ -205,6 +212,7 @@ export async function buildHookOutput(args: {
   client: HookClient;
   cacheFile: string;
   turnId?: string;
+  sessionId?: string;
 }): Promise<HookOutput> {
   const { harness, prompt, cfg, client, cacheFile } = args;
 
@@ -219,7 +227,8 @@ export async function buildHookOutput(args: {
       client,
       prompt,
       sameBank ? cached.recallTopic : undefined,
-      cfg.injectTimeoutMs
+      cfg.injectTimeoutMs,
+      { candidateTokens: cfg.recallCandidateTokens }
     );
     writeSessionCache(cacheFile, {
       turns,
@@ -232,6 +241,16 @@ export async function buildHookOutput(args: {
       sources: result.sources,
       reason: result.reason,
       chars: result.text.length,
+      bank: client.bank,
+      query: sanitizeSharedText(prompt, [client.apiToken]).slice(0, 160),
+      session: args.sessionId,
+      selected: result.items.map((item) => ({
+        source: item.source,
+        id: item.id,
+        title: item.title,
+        section: item.section,
+      })),
+      ...result.diagnostics,
     });
     return { context: result.text || undefined, pages: [] };
   }
@@ -497,6 +516,7 @@ export async function runHook(
     client,
     cacheFile,
     turnId: typeof ev.turn_id === "string" ? ev.turn_id : undefined,
+    sessionId,
   });
   // Mid-session heal: a bank with ZERO pages means the engine never built it (e.g. the session
   // predates the install, so no SessionStart and the first-prompt net already passed). Fire the

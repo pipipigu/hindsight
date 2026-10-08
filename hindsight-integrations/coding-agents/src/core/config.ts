@@ -152,6 +152,8 @@ export interface RawConfig {
    *  back empty on it: those set `{"types": ["world", "experience"]}`, or `{"types": null}` for
    *  every type. */
   recallOptions?: Record<string, unknown>;
+  /** Per-query candidate retrieval budget for registry recall; injection stays capped at 2,000. */
+  recallCandidateTokens?: number;
   /** Your own guidance for how the agent should treat memory, added AFTER the built-in tool guide
    *  (SessionStart and every refresh) and after the crediting note that comes back with
    *  `hindsight_search_knowledge_pages` results. It adds to the built-in text, never replaces it,
@@ -339,6 +341,7 @@ export interface Config {
   autoInject: AutoInject;
   pageSearchLimit: number;
   recallOptions: Record<string, unknown>;
+  recallCandidateTokens: number;
   toolGuideExtra?: string;
   pageRefreshEveryTurns: number;
   pageTriggerType: "auto-refresh" | "cron" | "manual";
@@ -668,6 +671,13 @@ export function resolveConfig(raw: RawConfig = {}): Config {
         : shared
           ? { types: ["world", "experience", "observation"], max_tokens: 2000, budget: "low" }
           : {},
+    recallCandidateTokens: Math.max(
+      1,
+      Math.min(
+        12000,
+        Number.isFinite(raw.recallCandidateTokens) ? Math.floor(raw.recallCandidateTokens!) : 6000
+      )
+    ),
     toolGuideExtra:
       typeof raw.toolGuideExtra === "string" && raw.toolGuideExtra.trim()
         ? raw.toolGuideExtra
@@ -785,6 +795,7 @@ const ENV_KEYS = {
   serverMode: "HINDSIGHT_SERVER_MODE",
   apiUrl: "HINDSIGHT_API_URL",
   apiToken: "HINDSIGHT_API_TOKEN",
+  recallCandidateTokens: "HINDSIGHT_RECALL_CANDIDATE_TOKENS",
   // These four keep the names the old per-agent Claude Code plugin used, so a user migrating from
   // it can carry their existing environment over unchanged.
   apiPort: "HINDSIGHT_API_PORT",
@@ -853,6 +864,7 @@ const ENV_NUMBERS = new Set<keyof RawConfig>([
   "reflectTimeoutMs",
   "reflectToolTimeoutMs",
   "injectTimeoutMs",
+  "recallCandidateTokens",
   "pageSearchLimit",
   "pageRefreshEveryTurns",
   "seedLimit",

@@ -309,19 +309,23 @@ export async function buildSessionStartContext(args: {
   // synthesize yet. A failed roster request is NOT evidence of that, so keep the two cases apart.
   let pages: PageRef[] = [];
   let pageListKnown = false;
-  try {
-    pages = parsePageList(await client.listPages());
-    pageListKnown = true;
-  } catch {
-    if (client.knowledgePagesSupported === false) {
-      diag(harness, "knowledge_pages_unavailable", { bank: bankId });
+  const rosterNeeded = cfg.bankResolution !== "registry" || cfg.autoInject !== "recall";
+  if (rosterNeeded)
+    try {
+      pages = parsePageList(await client.listPages());
+      pageListKnown = true;
+    } catch {
+      if (client.knowledgePagesSupported === false) {
+        diag(harness, "knowledge_pages_unavailable", { bank: bankId });
+      }
+      /* fail-open preamble; preserve first-prompt reflect eligibility on a transient outage */
     }
-    /* fail-open preamble; preserve first-prompt reflect eligibility on a transient outage */
-  }
-  const additionalContext = buildKnowledgePreamble(pages, {
-    reflectOnNewGoals: cfg.autoInject !== "reflect",
-    extra: cfg.toolGuideExtra,
-  });
+  const additionalContext = rosterNeeded
+    ? buildKnowledgePreamble(pages, {
+        reflectOnNewGoals: cfg.autoInject !== "reflect",
+        extra: cfg.toolGuideExtra,
+      })
+    : undefined;
   const deferInitialReflect = cold === true || (pageListKnown && pages.length === 0);
 
   // The banner shows on EVERY session — Hindsight's presence is part of the product, not a
@@ -350,7 +354,13 @@ export async function buildSessionStartContext(args: {
   }
 
   // ALWAYS record the session start (warm sessions used to log nothing — undebuggable).
-  diag(harness, "session_start", { bank: bankId, cold, pages: pages.length, ms: Date.now() - t0 });
+  diag(harness, "session_start", {
+    bank: bankId,
+    cold,
+    ...(rosterNeeded ? { pages: pages.length } : {}),
+    rosterFetched: rosterNeeded,
+    ms: Date.now() - t0,
+  });
 
   return { systemMessage, additionalContext, deferInitialReflect };
 }

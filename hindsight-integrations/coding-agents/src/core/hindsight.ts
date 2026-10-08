@@ -1,5 +1,6 @@
 import { createHash as identityHash } from "node:crypto";
 import { assertProjectBinding, resolveRegisteredProject } from "./project-registry";
+import type { RecallFact, RecallScores } from "./recall-evidence";
 /**
  * Harness-agnostic Hindsight HTTP client (raw fetch, no SDK dep).
  *
@@ -301,6 +302,40 @@ function shapePage(page: unknown): unknown {
   };
 }
 
+/** Automatic recall reads bounded page bodies; explicit user-invoked reads retain their contract. */
+async function pageJson(response: Response, limit?: number): Promise<unknown> {
+  if (limit === undefined) return response.json();
+  if (Number(response.headers.get("content-length")) > limit) {
+    await response.body?.cancel();
+    throw new Error("page_body_too_large");
+  }
+  if (!response.body) throw new Error("page_body_unavailable");
+  const reader = response.body.getReader(),
+    chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      size += chunk.value.byteLength;
+      if (size > limit) {
+        await reader.cancel();
+        throw new Error("page_body_too_large");
+      }
+      chunks.push(chunk.value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export class HindsightClient {
   readonly registryBinding?: ClientOpts["registryBinding"];
   private readonly boundCredential?: string;
@@ -482,14 +517,17 @@ export class HindsightClient {
     url: string,
     body?: unknown,
     tolerate: number[] = [],
-    timeoutMs = 15_000
+    timeoutMs = 15_000,
+    signal?: AbortSignal
   ): Promise<Response> {
     // Hard cap on EVERY request: a stalled server (pool deadlock, network) must degrade to a
     // memoryless turn — never hang a host that awaits us (opencode blocks its BOOT on plugin init).
     const r = await this.fetchWithAuth(url, {
       method,
       body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+        : AbortSignal.timeout(timeoutMs),
     });
     if (r.status === 429 && !tolerate.includes(429))
       throw new RateLimitedError(retryAfterMs(r.headers.get("retry-after")));
@@ -847,19 +885,57 @@ export class HindsightClient {
    * importers for a cosmetic gain. The doc above is the contract, not the name.
    */
   async recallObservations(query: string, opts: { timeoutMs: number }): Promise<string[]> {
+    return (await this.recallCandidates(query, opts)).map((row) => row.text);
+  }
+
+  /** Keep identities, dates and semantic scores for shared recall; legacy callers still get strings. */
+  async recallCandidates(
+    query: string,
+    opts: { timeoutMs: number; signal?: AbortSignal; candidateTokens?: number }
+  ): Promise<RecallFact[]> {
     const r = await this.req(
       "POST",
       this.bankUrl("/memories/recall"),
       // `query` is applied AFTER the spread: everything else is the caller's to override, but a
       // config that could replace the goal with a fixed string would silently recall for the
       // wrong question on every turn.
-      { ...this.recallOptions, query },
+      {
+        ...this.recallOptions,
+        ...(opts.candidateTokens === undefined
+          ? {}
+          : { max_tokens: Math.max(1, Math.min(12000, Math.floor(opts.candidateTokens))) }),
+        query,
+      },
       [],
-      opts.timeoutMs
+      opts.timeoutMs,
+      opts.signal
     );
     if (r.status === 404) return [];
-    const j = (await r.json()) as { results?: { text?: string }[] };
-    return (j.results ?? []).map((x) => (x.text ?? "").trim()).filter(Boolean);
+    const j = (await r.json()) as { results?: Record<string, unknown>[] };
+    if (!Array.isArray(j.results)) return [];
+    return j.results.flatMap((row) => {
+      if (!row || typeof row.text !== "string" || !row.text.trim()) return [];
+      const scores: RecallScores = {};
+      for (const key of ["reranker", "semantic", "final", "keyword"] as const) {
+        const value =
+          row.scores && typeof row.scores === "object"
+            ? (row.scores as Record<string, unknown>)[key]
+            : undefined;
+        if (typeof value === "number" && Number.isFinite(value)) scores[key] = value;
+      }
+      const string = (key: string) =>
+        typeof row[key] === "string" ? (row[key] as string) : undefined;
+      return [
+        {
+          text: row.text.trim(),
+          id: string("id"),
+          document_id: string("document_id"),
+          mentioned_at: string("mentioned_at"),
+          occurred_start: string("occurred_start"),
+          scores,
+        },
+      ];
+    });
   }
 
   /**
@@ -930,14 +1006,21 @@ export class HindsightClient {
    * the page — that is 70-95% of the raw bytes and can blow past an MCP host's per-tool-result
    * token cap.
    */
-  async getPage(pageId: string): Promise<unknown> {
+  async getPage(
+    pageId: string,
+    opts: { timeoutMs?: number; signal?: AbortSignal; maxBodyBytes?: number } = {}
+  ): Promise<unknown> {
     if (this.knowledgePagesSupported === false) throw new KnowledgePagesUnavailableError();
     const r = await this.req(
       "GET",
-      this.bankUrl(`/knowledge-base/pages/${encodeURIComponent(pageId)}`)
+      this.bankUrl(`/knowledge-base/pages/${encodeURIComponent(pageId)}`),
+      undefined,
+      [],
+      opts.timeoutMs ?? 15000,
+      opts.signal
     );
     if (r.status === 404) throw new Error(`knowledge page not found: ${pageId}`);
-    return shapePage(await r.json());
+    return shapePage(await pageJson(r, opts.maxBodyBytes));
   }
 
   /** Hybrid (BM25 + vector, RRF-fused) server-side search over the bank's knowledge pages.
@@ -945,7 +1028,7 @@ export class HindsightClient {
    *  hindsight_search_knowledge_pages. */
   async searchKnowledgePages(
     query: string,
-    opts: { limit?: number; timeoutMs?: number } = {}
+    opts: { limit?: number; timeoutMs?: number; signal?: AbortSignal } = {}
   ): Promise<
     { id: string; name: string; source_query?: string; snippet: string; score: number }[]
   > {
@@ -956,7 +1039,8 @@ export class HindsightClient {
       this.bankUrl(`/knowledge-base/search${q}`),
       undefined,
       [],
-      opts.timeoutMs
+      opts.timeoutMs,
+      opts.signal
     );
     // Routed through the same check as every other page endpoint. Without it a server with no
     // knowledge-base API parsed its own 404 body into zero hits and reported "nothing matched"
