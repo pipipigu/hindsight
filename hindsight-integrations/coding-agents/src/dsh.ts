@@ -1,3 +1,6 @@
+import { readRegistry } from "./core/project-registry";
+import { type PermissionMode } from "./core/tool-context";
+import { buildKnowledgeTools } from "./core/knowledge-tools";
 /**
  * DeepSeek Harness (`dsh`) entrypoint — a native Cordis plugin.
  *
@@ -23,7 +26,7 @@
  * and no version to keep in step — any dsh whose event names still match can load this file.
  */
 import { randomUUID } from "node:crypto";
-import { resolveHostMemory } from "./core/host-client";
+import { resolveHostMemory, resolveCatalogMemory, loadHostConfig } from "./core/host-client";
 import { diag } from "./core/diag";
 import type { ToolSpec } from "./core/knowledge-tools";
 import { log } from "./core/log";
@@ -64,16 +67,18 @@ interface DshUserMessage {
 }
 
 type PreStepDecision =
-  | { kind: "enter"; messages: DshUserMessage[] }
-  | { kind: "reject"; [key: string]: unknown };
+  { kind: "enter"; messages: DshUserMessage[] } | { kind: "reject"; [key: string]: unknown };
 
 interface PreStepPayload {
+  turn?: unknown;
   agent: DshAgent;
   signal: AbortSignal;
 }
 
 /** The Cordis context surface this plugin uses. */
 interface DshContext {
+  effect?(effect: () => () => void, label?: string): void;
+  get?(name: string): unknown;
   on(
     event: "agent/session-start",
     listener: (payload: { agent: DshAgent }) => void
@@ -154,7 +159,23 @@ function workspaceRoot(agent: DshAgent): string {
  * repositories. Building one has NO side effect: the seed is started by `ensureSeeded` when a
  * session actually opens, so merely registering the tools never seeds the launch directory.
  */
+let registryRevision = "";
 function workspaceFor(root: string): Workspace | undefined {
+  const cfg0 = loadHostConfig(HARNESS);
+  if (cfg0.bankResolution === "registry") {
+    try {
+      const revision = readRegistry(cfg0.projectRegistryFile).revision;
+      if (revision !== registryRevision) {
+        for (const work of workspaces.values()) work?.core.dispose();
+        workspaces.clear();
+        registryRevision = revision;
+      }
+    } catch {
+      for (const work of workspaces.values()) work?.core.dispose();
+      workspaces.clear();
+      return undefined;
+    }
+  }
   const cached = workspaces.get(root);
   if (cached !== undefined) return cached ?? undefined;
 
@@ -193,6 +214,8 @@ function ensureSeeded(workspace: Workspace): void {
 }
 
 function workspaceForAgent(agent: DshAgent): Workspace | undefined {
+  if (loadHostConfig(HARNESS).bankResolution === "registry" && !agent.session.header.cwd)
+    return undefined;
   // A subagent session is a child of a conversation we already track: injecting into it would pay
   // for a second recall per delegation, and retaining it would file a fragment of a session that
   // the parent already stores in full.
@@ -243,7 +266,11 @@ function injectionMessage(text: string): DshUserMessage {
  * The three lifecycle handlers, over an injectable workspace resolver. `apply` binds these to the
  * real Cordis events; the tests drive them with a stand-in agent and core.
  */
-export function createDshHooks(resolve: (agent: DshAgent) => Workspace | undefined) {
+export function createDshHooks(
+  resolve: (agent: DshAgent) => Workspace | undefined,
+  modeFor: (agent: DshAgent) => PermissionMode = () => "unknown"
+) {
+  const seen = new WeakMap<object, Set<string>>();
   return {
     sessionStart({ agent }: { agent: DshAgent }): void {
       const workspace = resolve(agent);
@@ -253,7 +280,7 @@ export function createDshHooks(resolve: (agent: DshAgent) => Workspace | undefin
     },
 
     async preStep(
-      { agent, signal }: PreStepPayload,
+      { agent, signal, turn }: PreStepPayload,
       next: () => Promise<PreStepDecision>
     ): Promise<PreStepDecision> {
       const decision = await next();
@@ -269,6 +296,17 @@ export function createDshHooks(resolve: (agent: DshAgent) => Workspace | undefin
       // block is already in the history the model is about to be sent.
       const prompt = promptOf(decision.messages);
       if (!prompt) return decision;
+      const key = JSON.stringify([
+        turn,
+        decision.messages.filter((m) => m.source.kind === "user").map((m) => m.id),
+        prompt,
+      ]);
+      const previous = seen.get(agent.session) ?? new Set<string>();
+      if (previous.has(key)) return decision;
+      previous.add(key);
+      if (previous.size > 200) previous.delete(previous.values().next().value!);
+      seen.set(agent.session, previous);
+      void workspace.core.prepareSharedPages?.(modeFor(agent))?.catch(() => {});
       await workspace.core.onPrompt(sessionId, prompt);
       const injection = workspace.core.getInjection(sessionId);
       if (!injection) {
@@ -353,14 +391,24 @@ async function runSpec(spec: ToolSpec, args: Record<string, unknown>): Promise<s
  * every agent — including the Web surface's per-session agent presets. Each call resolves the bank
  * from the CALLING agent's workspace, because one process serves many repositories.
  */
-function registerTools(toolCtx: DshToolContext, fallbackRoot: string): void {
+function registerTools(
+  toolCtx: DshToolContext,
+  fallbackRoot: string,
+  modeFor: (agent?: DshAgent) => PermissionMode
+): void {
   // The registry is populated at plugin load, before any session exists, so the NAMES and schemas
   // come from the launch directory's workspace and each call rebinds to its own caller's bank. The
   // one consequence: if memory is off for the launch directory specifically (a `banks.<id>`
   // opt-out) the tools are absent even for other repositories this process later serves.
   const template = workspaceFor(fallbackRoot);
-  if (!template) return; // memory disabled where this process was launched
-  for (const spec of specsOf(template)) {
+  const cfg = loadHostConfig(HARNESS);
+  if (!template && (cfg.disabled || cfg.bankResolution !== "registry")) return;
+  const catalog = template
+    ? specsOf(template)
+    : buildKnowledgeTools(resolveCatalogMemory(HARNESS, fallbackRoot).client, "", {
+        harness: HARNESS,
+      });
+  for (const spec of catalog) {
     toolCtx.tools.register({
       name: spec.name,
       description: spec.description,
@@ -371,11 +419,16 @@ function registerTools(toolCtx: DshToolContext, fallbackRoot: string): void {
       },
       async execute(args: Record<string, unknown>, exec: DshToolRunContext): Promise<string> {
         // Bind to the caller's repository, not to whichever workspace happened to load first.
-        const workspace = exec?.agent ? workspaceForAgent(exec.agent) : template;
+        const workspace = exec?.agent
+          ? workspaceForAgent(exec.agent)
+          : cfg.bankResolution === "registry"
+            ? undefined
+            : template;
         if (!workspace) return "Hindsight memory is disabled for this workspace.";
-        const bound = specsOf(workspace).find((candidate) => candidate.name === spec.name);
+        const bound = workspace.core.toolSpecs().find((candidate) => candidate.name === spec.name);
         if (!bound) return `Hindsight tool ${spec.name} is unavailable.`;
-        return runSpec(bound, args);
+        const result = await bound.handler(args, { permission: modeFor(exec?.agent) });
+        return result.content.map((c) => c.text).join("\n");
       },
     });
   }
@@ -383,7 +436,7 @@ function registerTools(toolCtx: DshToolContext, fallbackRoot: string): void {
   // reaches a model is the failure mode worth catching, and this is the one line that shows it.
   const exposed = toolCtx.tools.schemas?.() ?? [];
   log.debug(HARNESS, "tools registered", {
-    count: specsOf(template).length,
+    count: catalog.length,
     hostCatalog: exposed.length,
     hindsight: exposed.filter((schema) => schema.name?.startsWith("hindsight_")).length,
   });
@@ -402,7 +455,36 @@ function specsOf(workspace: Workspace): ToolSpec[] {
  * never throws, and a workspace we cannot resolve simply leaves that session unmemoried.
  */
 export function apply(ctx: DshContext): void {
-  const hooks = createDshHooks(workspaceForAgent);
+  ctx.effect?.(
+    () => () => {
+      for (const work of workspaces.values()) work?.core.dispose();
+      workspaces.clear();
+    },
+    "hindsight.shared-delivery"
+  );
+  const modeFor = (agent?: DshAgent): PermissionMode => {
+    if (!agent) return "unknown";
+    const plan = ctx.get?.("planMode") as
+      | {
+          get?: (a: DshAgent) => { active?: boolean; pending?: boolean };
+          loggedActiveAtLastHeader?: (s: DshSession) => boolean | undefined;
+        }
+      | undefined;
+    try {
+      const state = plan?.get?.(agent);
+      const header = plan?.loggedActiveAtLastHeader?.(agent.session);
+      if (
+        (state?.pending !== undefined && typeof state.pending !== "boolean") ||
+        (header !== undefined && typeof header !== "boolean")
+      )
+        return "unknown";
+      if (state?.active === true || state?.pending === true || header === true) return "plan";
+      return state?.active === false ? "normal" : "unknown";
+    } catch {
+      return "unknown";
+    }
+  };
+  const hooks = createDshHooks(workspaceForAgent, modeFor);
   ctx.on("agent/session-start", hooks.sessionStart);
   // `prepend: true` puts this listener outermost, so the injection is appended AFTER every other
   // contributor's messages — the memory block reads last, closest to the model's turn.
@@ -412,7 +494,7 @@ export function apply(ctx: DshContext): void {
   // The tools registry is optional: a composition without it (a bare headless assembly) still gets
   // recall, injection and write-back.
   ctx.inject(["tools"], (toolCtx) => {
-    registerTools(toolCtx, process.cwd());
+    registerTools(toolCtx, process.cwd(), modeFor);
   });
 }
 

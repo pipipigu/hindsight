@@ -1,3 +1,5 @@
+import { permissionMode } from "./tool-context";
+import { buildPageTrigger } from "./missions";
 /**
  * Shared `SessionStart` lifecycle: deterministically auto-seeds a cold repo's bank from its git
  * history (in the background, non-blocking), keeps warm banks deepening on every start, and
@@ -405,6 +407,14 @@ export async function runSessionStartHook(
     // cold one keeps coming up in the background and is picked up by a later turn.
     await ensureDaemon(cfg, harness, { waitMs: DAEMON_WAIT_SESSION_START_MS });
     const client = makeClient({
+      registryBinding:
+        cfg.bankResolution === "registry"
+          ? {
+              directory: cwd,
+              file: cfg.projectRegistryFile,
+              networkConfigured: cfg.networkConfigured,
+            }
+          : undefined,
       apiUrl: cfg.apiUrl,
       apiToken: cfg.apiToken,
       bank: bankId,
@@ -412,6 +422,13 @@ export async function runSessionStartHook(
       observationScopes: cfg.observationScopes,
     });
 
+    if (
+      cfg.bankResolution === "registry" &&
+      permissionMode(ev.permission_mode) === "normal" &&
+      client instanceof HindsightClient
+    ) {
+      await client.seedPages(buildPageTrigger(cfg), cfg.pages, cfg.customPages).catch(() => {});
+    }
     const out = await buildSessionStartContext({ cwd, sessionRoot, bankId, cfg, client, harness });
     // The registration's banner hint (e.g. TraeCode's workspace-MCP gate) rides the same
     // user-facing message as the legacy-plugin warning — the banner is the only visible channel.

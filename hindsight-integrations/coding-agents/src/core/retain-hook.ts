@@ -243,6 +243,14 @@ export async function runRetainHook(
   // produces the same `retain_failed` diagnostic as an unreachable Cloud/self-hosted server.
   await ensureDaemon(cfg, spec.harness, { waitMs: DAEMON_WAIT_RETAIN_MS });
   const client = makeClient({
+    registryBinding:
+      cfg.bankResolution === "registry"
+        ? {
+            directory: cwd,
+            file: cfg.projectRegistryFile,
+            networkConfigured: cfg.networkConfigured,
+          }
+        : undefined,
     apiUrl: cfg.apiUrl,
     apiToken: cfg.apiToken,
     bank: bankId,

@@ -2,6 +2,8 @@ import { defineConfig } from "tsup";
 
 export default defineConfig({
   entry: {
+    "shared-context-hook": "src/shared-context-hook.ts",
+    "project-registry": "src/project-registry.ts",
     index: "src/index.ts",
     // opencode v2 (`opencode2`) loads this via the package's root index.js, which re-exports it.
     // Its plugin contract shares nothing with v1's, so it is a separate entry — see src/opencode2.ts.
@@ -69,7 +71,8 @@ export default defineConfig({
     "hindsight-seed": "src/hindsight-seed.ts",
   },
   format: ["esm"],
-  target: "node18",
+  target: "node24",
+  removeNodeProtocol: false,
   clean: true,
   dts: { entry: "src/index.ts" },
   shims: false,

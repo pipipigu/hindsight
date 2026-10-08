@@ -535,7 +535,9 @@ describe("every memory write goes through the one call site that scopes it", () 
     const body = src.slice(src.indexOf("async retain("), src.indexOf('bankUrl("/memories")'));
     // The scoping may be derived per document (see `per_source`), but it must still be set on the
     // item here and still come from the configured value — not from a server default.
-    expect(body).toMatch(/observation_scopes: .*this\.observationScopes/);
+    expect(body).toMatch(
+      /observation_scopes: resolveRetainScopes\([\s\S]*?this\.observationScopes/
+    );
   });
 });
 

@@ -1,3 +1,5 @@
+import { assertCanWrite, type PermissionMode } from "./tool-context";
+import { saveConclusion, conclusionStatus, CONCLUSION_GUIDE } from "./conclusions";
 /**
  * Knowledge-page MCP tool specs — runtime SDK-free so this stays unit-testable without a real MCP
  * host.
@@ -86,7 +88,7 @@ export interface ToolSpec {
    * NON_DESTRUCTIVE_WRITE_ANNOTATIONS so clients still gate them, but for the right reason.
    */
   annotations: ToolSafetyAnnotations;
-  handler: (args: any) => Promise<ToolResult>;
+  handler: (args: any, context?: { permission: PermissionMode }) => Promise<ToolResult>;
 }
 
 function ok(value: unknown): ToolResult {
@@ -131,7 +133,7 @@ export function buildKnowledgeTools(
 ): ToolSpec[] {
   const extra = opts.toolGuideExtra?.trim();
   const crediting = extra ? `${CREDIT_REMINDER} ${extra}` : CREDIT_REMINDER;
-  return [
+  const tools: ToolSpec[] = [
     {
       name: "hindsight_sync_status",
       description:
@@ -376,4 +378,55 @@ export function buildKnowledgeTools(
       }),
     },
   ];
+  if (!client.registryBinding) return tools;
+  tools.push({
+    name: "hindsight_save_conclusion",
+    description: CONCLUSION_GUIDE,
+    inputSchema: {
+      content: z.string().min(1).max(8000),
+      evidence: z.string().min(1).max(4000),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: async (args) => ok(await saveConclusion(client, args, opts.harness ?? "unknown")),
+  });
+  return tools.map((tool) => ({
+    ...tool,
+    description: tool.description
+      .replace(
+        "Ingestion is automatic and background",
+        "Conversation and Git capture are disabled by default; explicit submissions are background"
+      )
+      .replace(
+        "that's captured automatically at session end",
+        "automatic conversation capture is disabled; save durable conclusions with evidence"
+      ),
+    handler: async (args, context) => {
+      try {
+        if (!tool.annotations.readOnlyHint) assertCanWrite(context?.permission ?? "unknown");
+        // Agent-supplied bank/directory overrides have no place in a project-bound tool.
+        if ("bank_id" in args || "bankId" in args || "cwd" in args)
+          throw new Error("project_override_denied");
+        if (tool.name === "hindsight_sync_status")
+          return ok({ bank: bankId, queue: conclusionStatus(client) });
+        const result = await tool.handler(args, context);
+        return result.isError
+          ? { isError: true, content: [{ type: "text", text: "memory_request_failed" }] }
+          : result;
+      } catch (e) {
+        const message =
+          e instanceof Error &&
+          /^(plan_readonly|host_permission_unavailable|project_[a-z_]+|conclusion_[a-z_]+)$/.test(
+            e.message
+          )
+            ? e.message
+            : "memory_request_failed";
+        return { isError: true, content: [{ type: "text", text: message }] };
+      }
+    },
+  }));
 }

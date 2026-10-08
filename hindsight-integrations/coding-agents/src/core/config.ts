@@ -49,6 +49,10 @@ export const DEFAULT_DAEMON_PROFILE = "coding-agent";
 /** Incremental git-sync settings (see core/sync.ts). */
 /** The config file's shape — every field optional; omitted fields take the documented default. */
 export interface RawConfig {
+  /** Registry-only shared memory, or explicit upstream compatibility mode. */
+  bankResolution?: "registry" | "upstream";
+  /** Private independent project mapping file. */
+  projectRegistryFile?: string;
   /** Where memory lives. All three modes speak the same HTTP API; they differ only in who runs it:
    *   "cloud"       — Hindsight Cloud (the default `apiUrl`)
    *   "self-hosted" — a Hindsight server you run; set `apiUrl` to it
@@ -302,6 +306,10 @@ export interface RawConfig {
 
 /** Fully-resolved config: every field present. */
 export interface Config {
+  /** Internal provenance: a missing self-hosted config must not send prompts to the cloud default. */
+  networkConfigured?: boolean;
+  bankResolution?: "registry" | "upstream";
+  projectRegistryFile?: string;
   serverMode: "cloud" | "self-hosted" | "daemon";
   /** The EFFECTIVE base URL. In daemon mode this is already 127.0.0.1:{apiPort}, so every caller
    *  that builds a client keeps working without knowing which mode is active. */
@@ -587,6 +595,9 @@ function resolveAutoInject(raw: RawConfig): AutoInject {
 }
 
 export function resolveConfig(raw: RawConfig = {}): Config {
+  const mode = raw.bankResolution ?? process.env.HINDSIGHT_BANK_RESOLUTION ?? "registry";
+  if (mode !== "registry" && mode !== "upstream") throw new Error("invalid_bank_resolution");
+  const shared = mode === "registry";
   const serverMode = ["cloud", "self-hosted", "daemon"].includes(raw.serverMode as string)
     ? (raw.serverMode as "cloud" | "self-hosted" | "daemon")
     : "cloud";
@@ -618,9 +629,19 @@ export function resolveConfig(raw: RawConfig = {}): Config {
       ? raw.optInPaths.filter((p): p is string => typeof p === "string" && p.trim() !== "")
       : [],
     harness: raw.harness ?? "opencode",
+    networkConfigured:
+      !shared ||
+      Boolean(typeof raw.apiUrl === "string" && raw.apiUrl.trim()) ||
+      raw.serverMode === "cloud" ||
+      raw.serverMode === "daemon",
+    bankResolution: shared ? "registry" : "upstream",
+    projectRegistryFile:
+      raw.projectRegistryFile ??
+      process.env.HINDSIGHT_PROJECT_REGISTRY_FILE ??
+      process.env.HINDSIGHT_PROJECT_REGISTRY,
     disabled: raw.disabled ?? false,
-    retainSessions: raw.retainSessions ?? true, // write sessions back by default, every harness
-    manageBankConfig: raw.manageBankConfig ?? true,
+    retainSessions: raw.retainSessions ?? !shared, // write sessions back by default, every harness
+    manageBankConfig: raw.manageBankConfig ?? !shared,
     retainExtractionMode: RETAIN_EXTRACTION_MODES.includes(raw.retainExtractionMode!)
       ? raw.retainExtractionMode!
       : DEFAULT_RETAIN_EXTRACTION_MODE,
@@ -635,7 +656,7 @@ export function resolveConfig(raw: RawConfig = {}): Config {
       Math.max(raw.reflectTimeoutMs || 0, DEFAULT_REFLECT_TOOL_TIMEOUT_MS),
     injectTimeoutMs: raw.injectTimeoutMs || DEFAULT_INJECT_TIMEOUT_MS,
     reflectBudget: resolveReflectBudget(raw),
-    autoInject: resolveAutoInject(raw),
+    autoInject: shared && raw.autoInject === undefined ? "recall" : resolveAutoInject(raw),
     pageSearchLimit: raw.pageSearchLimit || DEFAULT_PAGE_SEARCH_LIMIT,
     // Same shape as retainMetadata: an object, or nothing. An array would spread into numeric
     // keys and reach the API as garbage, so it is rejected like any other non-object.
@@ -644,7 +665,9 @@ export function resolveConfig(raw: RawConfig = {}): Config {
       typeof raw.recallOptions === "object" &&
       !Array.isArray(raw.recallOptions)
         ? { ...raw.recallOptions }
-        : {},
+        : shared
+          ? { types: ["world", "experience", "observation"], max_tokens: 2000, budget: "low" }
+          : {},
     toolGuideExtra:
       typeof raw.toolGuideExtra === "string" && raw.toolGuideExtra.trim()
         ? raw.toolGuideExtra
@@ -658,15 +681,17 @@ export function resolveConfig(raw: RawConfig = {}): Config {
     pageTriggerCron: pageTrigger.cron,
     pages: resolvePages(raw.pages),
     customPages: resolveCustomPages(raw.customPages),
-    autoSeed: raw.autoSeed ?? true,
+    autoSeed: raw.autoSeed ?? !shared,
     seedLimit: raw.seedLimit || DEFAULT_SEED_LIMIT,
-    codebaseSurvey: raw.codebaseSurvey ?? true,
+    codebaseSurvey: raw.codebaseSurvey ?? !shared,
     surveyModel: raw.surveyModel || "haiku",
     surveyBudgetUsd: raw.surveyBudgetUsd || 2,
     surveyRefreshCommits: raw.surveyRefreshCommits ?? 20,
     gitIngest: ["message", "full", "none"].includes(raw.gitIngest as string)
       ? (raw.gitIngest as "message" | "full" | "none")
-      : "message",
+      : shared
+        ? "none"
+        : "message",
     // Hostile input is a config typo, not an attack: keep only string entries so a stray number or
     // nested object cannot reach the API as a tag and fail the whole retain.
     retainTags: Array.isArray(raw.retainTags)
@@ -690,7 +715,7 @@ export function resolveConfig(raw: RawConfig = {}): Config {
     logLevel: ["debug", "info", "warn", "error"].includes(raw.logLevel as string)
       ? (raw.logLevel as "debug" | "info" | "warn" | "error")
       : "info",
-    autoUpdate: raw.autoUpdate ?? true,
+    autoUpdate: raw.autoUpdate ?? !shared,
   };
 }
 
@@ -699,6 +724,8 @@ function readRaw(path: string): RawConfig {
     return JSON.parse(readFileSync(path, "utf8")) as RawConfig;
   } catch (e) {
     if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      if (process.env.HINDSIGHT_BANK_RESOLUTION !== "upstream")
+        throw new Error("invalid_memory_configuration");
       console.error(`hindsight: ignoring invalid config at ${path}: ${(e as Error)?.message || e}`);
     }
     return {};
@@ -753,6 +780,8 @@ function applyLayer(raw: RawConfig, layer: RawConfig, harness?: string): RawConf
  * does not survive flattening into one env var. They stay file-only.
  */
 const ENV_KEYS = {
+  bankResolution: "HINDSIGHT_BANK_RESOLUTION",
+  projectRegistryFile: "HINDSIGHT_PROJECT_REGISTRY_FILE",
   serverMode: "HINDSIGHT_SERVER_MODE",
   apiUrl: "HINDSIGHT_API_URL",
   apiToken: "HINDSIGHT_API_TOKEN",
@@ -866,7 +895,11 @@ export function loadConfig(opts: LoadOptions | string = {}): Config {
   const o: LoadOptions = typeof opts === "string" ? { path: opts } : opts; // legacy: loadConfig(path)
   // Env first so the FILE wins on any field it sets.
   const withEnv = applyLayer({}, readEnvConfig(), o.harness);
-  const raw = applyLayer(withEnv, readRaw(o.path ?? CONFIG_PATH), o.harness);
+  const raw = applyLayer(
+    withEnv,
+    readRaw(o.path ?? process.env.HINDSIGHT_CONFIG ?? CONFIG_PATH),
+    o.harness
+  );
   // The harness that ASKED is the correct fallback for an unset `harness` field — not a hardcoded
   // "opencode", whose silent default misfiled every other harness's background seed into an
   // `opencode::<project>` bank (#3247). An explicit `harness:` in the config file still wins.
@@ -877,6 +910,8 @@ export function loadConfig(opts: LoadOptions | string = {}): Config {
 /** Bank-resolution fields are meaningless inside a `banks.<id>` section (they can't change the id
  *  that selected it) — strip them so a typo there can't silently re-route memory. */
 const BANK_OVERRIDE_EXCLUDED = [
+  "bankResolution",
+  "projectRegistryFile",
   "bankId",
   "bankIdTemplate",
   "mapPathToBank",

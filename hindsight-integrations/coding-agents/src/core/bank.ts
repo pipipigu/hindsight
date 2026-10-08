@@ -1,3 +1,4 @@
+import { resolveRegisteredProject } from "./project-registry";
 /**
  * Dynamic bank resolution — which memory bank does THIS directory belong to?
  *
@@ -36,6 +37,8 @@ import { log } from "./log";
 import { applyTemplate } from "./template";
 
 export interface BankConfig {
+  bankResolution?: "registry" | "upstream";
+  projectRegistryFile?: string;
   bankId?: string;
   dynamicBankId?: boolean;
   bankIdTemplate?: string;
@@ -253,6 +256,14 @@ function lookupDirectories(config: BankConfig, directory: string, sessionRoot = 
  * inert even then — a privacy switch has to fail closed.
  */
 export function isOptedIn(config: BankConfig, directory: string): boolean {
+  if (config.bankResolution === "registry") {
+    try {
+      resolveRegisteredProject(directory, config.projectRegistryFile);
+      return true;
+    } catch {
+      return false;
+    }
+  }
   if (!config.optInOnly) return true;
   if (!directory) return false;
   const directories = lookupDirectories(config, directory);
@@ -307,6 +318,8 @@ export function deriveBankId(
    *  entry this directory inherits (lookupDirectories). */
   sessionRoot?: string
 ): string {
+  if (config.bankResolution === "registry")
+    return resolveRegisteredProject(directory, config.projectRegistryFile).bankId;
   const mapped = mappedBank(config, directory, sessionRoot);
   if (mapped) return mapped;
 
@@ -346,6 +359,7 @@ export function bankProjectName(
   directory: string,
   sessionRoot?: string
 ): string | undefined {
+  if (config.bankResolution === "registry") return undefined;
   if (mappedBank(config, directory, sessionRoot)) return undefined;
 
   const dynamic = config.dynamicBankId ?? !config.bankId;
@@ -383,12 +397,16 @@ export function deriveBankIdOrSkip(
   try {
     return deriveBankId(config, directory, harness, sessionRoot);
   } catch (error) {
-    if (!(error instanceof BankResolutionError)) throw error;
+    if (!(error instanceof BankResolutionError) && config.bankResolution !== "registry")
+      throw error;
     log.warn(harness, "bank unresolved: skipping (repository could not be identified)", {
       directory,
-      error: error.message,
+      error: error instanceof Error ? error.message : "bank_resolution_failed",
     });
-    diag(harness, "bank_unresolved", { directory, error: error.message });
+    diag(harness, "bank_unresolved", {
+      directory,
+      error: error instanceof Error ? error.message : "bank_resolution_failed",
+    });
     return null;
   }
 }

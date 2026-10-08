@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { loadConfig as sharedConfig } from "./core/config";
 /**
  * hindsight-coding-agents install|uninstall [harness...]
  *
@@ -270,6 +271,15 @@ function mergeHarnessHooks(
   if (spec.configStyle === "toml-array")
     throw new Error(`${harness} writes its own TOML hook block; mergeHarnessHooks cannot emit it`);
 
+  if (
+    (harness === "codex" || harness === "claude-code") &&
+    sharedConfig().bankResolution === "registry"
+  ) {
+    const entry = cmdHook(dist, "shared-context-hook.js", 10);
+    entry.hooks[0].command += " " + harness;
+    hooks.PreToolUse = mergeHookEvent(hooks.PreToolUse, entry);
+  }
+  const memoryConfig = sharedConfig({ harness });
   const installedEvents = new Set<string>();
   for (const hook of [...Object.values(spec.install), ...(spec.additionalHooks ?? [])]) {
     // Antigravity has no SessionStart event. Its first PreInvocation performs the same seed guard,
@@ -278,7 +288,13 @@ function mergeHarnessHooks(
     installedEvents.add(hook.event);
     const entry =
       spec.configStyle === "nested"
-        ? cmdHook(dist, hook.entry, hook.timeout!)
+        ? cmdHook(
+            dist,
+            hook.entry,
+            memoryConfig.bankResolution === "registry" && hook.event === "UserPromptSubmit"
+              ? Math.max(hook.timeout!, Math.ceil(memoryConfig.injectTimeoutMs / 1000) + 5)
+              : hook.timeout!
+          )
         : spec.configStyle === "process"
           ? processHook(dist, hook.entry, hook.timeout!)
           : {
@@ -290,6 +306,8 @@ function mergeHarnessHooks(
 }
 
 function stripHarnessHooks(hooks: Record<string, any>, harness: HookHarnessName): void {
+  if (harness === "codex" || harness === "claude-code")
+    setOrDelete(hooks, "PreToolUse", stripOurs(hooks.PreToolUse));
   const strippedEvents = new Set<string>();
   const spec = HOOK_HARNESSES[harness];
   for (const hook of [...Object.values(spec.install), ...(spec.additionalHooks ?? [])]) {

@@ -1,3 +1,4 @@
+import { sharedRecall } from "./shared-recall";
 /**
  * Shared runtime for HOOK-based harnesses (Claude Code, Codex, Cursor CLI, ...).
  *
@@ -77,6 +78,8 @@ export interface HookSpec {
 
 /** Minimal client shape `buildHookOutput` needs — `HindsightClient` satisfies it structurally. */
 interface HookClient {
+  readonly scopeIdentity?: string;
+  readonly apiToken?: string;
   reflect(query: string, opts: { budget?: string; timeoutMs: number }): Promise<string>;
   listPages(): Promise<unknown>;
   searchKnowledgePages(
@@ -201,11 +204,37 @@ export async function buildHookOutput(args: {
   cfg: Config;
   client: HookClient;
   cacheFile: string;
+  turnId?: string;
 }): Promise<HookOutput> {
   const { harness, prompt, cfg, client, cacheFile } = args;
 
   const cached = readSessionCache(cacheFile);
   const turns = (cached.turns ?? 0) + 1;
+  if (cfg.bankResolution === "registry" && cfg.autoInject === "recall") {
+    const sameBank =
+      cached.recallBank === client.bank && cached.recallScope === client.scopeIdentity;
+    const seen = sameBank ? (cached.recallTurns ?? []) : [];
+    if (args.turnId && seen.includes(args.turnId)) return { context: undefined, pages: [] };
+    const result = await sharedRecall(
+      client,
+      prompt,
+      sameBank ? cached.recallTopic : undefined,
+      cfg.injectTimeoutMs
+    );
+    writeSessionCache(cacheFile, {
+      turns,
+      recallTopic: result.topic,
+      recallBank: client.bank,
+      recallScope: client.scopeIdentity,
+      recallTurns: args.turnId ? [...seen, args.turnId].slice(-64) : seen,
+    });
+    diag(harness, "shared_recall", {
+      sources: result.sources,
+      reason: result.reason,
+      chars: result.text.length,
+    });
+    return { context: result.text || undefined, pages: [] };
+  }
 
   // ── auto-inject: once per session, on the first prompt ────────────────────────
   // cfg.autoInject picks the source: a reflect synthesis, a knowledge-page search, or a recall of
@@ -435,6 +464,14 @@ export async function runHook(
     return;
   }
   const client = makeClient({
+    registryBinding:
+      cfg.bankResolution === "registry"
+        ? {
+            directory: cwd,
+            file: cfg.projectRegistryFile,
+            networkConfigured: cfg.networkConfigured,
+          }
+        : undefined,
     apiUrl: cfg.apiUrl,
     apiToken: cfg.apiToken,
     bank: bankId,
@@ -453,7 +490,14 @@ export async function runHook(
     startBackgroundSeed(cwd, { limit: cfg.seedLimit, harness: spec.harness });
   }
 
-  const output = await buildHookOutput({ harness: spec.harness, prompt, cfg, client, cacheFile });
+  const output = await buildHookOutput({
+    harness: spec.harness,
+    prompt,
+    cfg,
+    client,
+    cacheFile,
+    turnId: typeof ev.turn_id === "string" ? ev.turn_id : undefined,
+  });
   // Mid-session heal: a bank with ZERO pages means the engine never built it (e.g. the session
   // predates the install, so no SessionStart and the first-prompt net already passed). Fire the
   // idempotent engine — the per-bank lock makes repeats free while it builds.

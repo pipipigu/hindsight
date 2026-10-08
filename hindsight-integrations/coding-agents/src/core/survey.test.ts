@@ -9,7 +9,7 @@ import {
 import { releaseLease, SURVEY_SPEC_ENV, type SurveySupervisorSpec } from "./survey-lease";
 
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -388,6 +388,11 @@ describe("startCodebaseSurvey", () => {
       });
       console.log(JSON.stringify(started));
     `;
+    // This fixture exercises the optional upstream survey process, not shared-memory defaults.
+    writeFileSync(
+      config,
+      JSON.stringify({ ...JSON.parse(readFileSync(config, "utf8")), bankResolution: "upstream" })
+    );
     const runHook = async () => {
       const { stdout } = await promisify(execFile)(
         process.execPath,

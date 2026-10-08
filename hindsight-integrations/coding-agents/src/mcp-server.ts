@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { pendingConclusionWorkspaces, retryConclusions } from "./core/conclusions";
+import { z } from "zod";
+import { cleanArguments, verifyToolContext } from "./core/tool-context";
 /**
  * Native TS MCP (stdio) server exposing the `hindsight_*` knowledge-page + recall + capture tools.
  *
@@ -17,7 +20,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { type Config } from "./core/config";
-import { resolveHostMemory } from "./core/host-client";
+import { resolveHostMemory, resolveCatalogMemory, loadHostConfig } from "./core/host-client";
 import { HindsightClient } from "./core/hindsight";
 import { buildKnowledgeTools, type ToolSpec } from "./core/knowledge-tools";
 import { buildPageTrigger } from "./core/missions";
@@ -33,11 +36,11 @@ export function selectTools(
   cfg: Config,
   client: HindsightClient,
   bankId: string,
-  opts: { cwd?: string; harness?: string } = {}
+  opts: { cwd?: string; harness?: string; signal?: AbortSignal } = {}
 ): ToolSpec[] {
   const cwd = opts.cwd ?? process.cwd();
   const harness = opts.harness ?? cfg.harness;
-  return cfg.disabled
+  const tools = cfg.disabled
     ? []
     : buildKnowledgeTools(client, bankId, {
         repoDir: cwd,
@@ -48,6 +51,52 @@ export function selectTools(
         toolGuideExtra: cfg.toolGuideExtra,
         stampFor: () => buildRetainStamp(cfg, { directory: cwd, harness, bankId }),
       });
+  if (cfg.bankResolution !== "registry") return tools;
+  return tools.map((tool) => ({
+    ...tool,
+    inputSchema: {
+      ...tool.inputSchema,
+      _context: z.string().optional().describe("Internal trusted hook context; do not generate"),
+    },
+    handler: async (args) => {
+      try {
+        const claims = verifyToolContext(args._context, tool.name, args);
+        if (claims.harness !== harness) throw new Error("wrong_harness_context");
+        const live = resolveHostMemory(harness, claims.cwd);
+        if (opts.signal) live.client.bindCancellation(opts.signal);
+        if (live.cfg.disabled) throw new Error("project_disabled");
+        const bound = selectNativeTools(
+          live.cfg,
+          live.client,
+          live.bankId,
+          claims.cwd,
+          harness
+        ).find((t) => t.name === tool.name);
+        if (!bound) throw new Error("tool_unavailable");
+        return await bound.handler(cleanArguments(args), { permission: claims.mode });
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: "trusted_project_context_unavailable" }],
+        };
+      }
+    },
+  }));
+}
+function selectNativeTools(
+  cfg: Config,
+  client: HindsightClient,
+  bankId: string,
+  cwd: string,
+  harness: string
+): ToolSpec[] {
+  return buildKnowledgeTools(client, bankId, {
+    repoDir: cwd,
+    harness,
+    pageTrigger: buildPageTrigger(cfg),
+    reflectTimeoutMs: cfg.reflectToolTimeoutMs,
+    reflectBudget: cfg.reflectBudget,
+  });
 }
 
 /**
@@ -120,7 +169,7 @@ export function buildMcpServer(tools: ToolSpec[]): McpServer {
         inputSchema: tool.inputSchema,
         annotations: tool.annotations,
       },
-      tool.handler
+      (args) => tool.handler(args)
     );
   }
   return server;
@@ -133,8 +182,37 @@ async function main() {
   const harness = resolveHarness();
   const { cfg, bankId, client } = resolveHostMemory(harness, cwd);
 
-  const server = buildMcpServer(selectTools(cfg, client, bankId, { cwd, harness }));
+  const shutdown = new AbortController();
+  const global = loadHostConfig(harness);
+  const catalogClient =
+    cfg.bankResolution === "registry" ? resolveCatalogMemory(harness, cwd).client : client;
+  const server = buildMcpServer(
+    selectTools(
+      { ...cfg, disabled: cfg.bankResolution === "registry" ? global.disabled : cfg.disabled },
+      catalogClient,
+      bankId,
+      { cwd, harness, signal: shutdown.signal }
+    )
+  );
 
+  const timer =
+    global.bankResolution === "registry"
+      ? setInterval(() => {
+          void (async () => {
+            for (const work of pendingConclusionWorkspaces()) {
+              if (shutdown.signal.aborted) break;
+              const live = resolveHostMemory(work.harness, work.cwd);
+              live.client.bindCancellation(shutdown.signal);
+              if (!live.cfg.disabled) await retryConclusions(live.client);
+            }
+          })().catch(() => {});
+        }, 30000)
+      : undefined;
+  timer?.unref();
+  server.server.onclose = () => {
+    shutdown.abort();
+    if (timer) clearInterval(timer);
+  };
   await server.connect(new StdioServerTransport());
 }
 

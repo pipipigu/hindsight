@@ -6,7 +6,7 @@
     "url": "https://github.com/vectorize-io/hindsight.git",
     "directory": "hindsight-integrations/coding-agents"
   },
-  "description": "Reflect-only Hindsight long-term memory for coding agents (harness-pluggable: opencode, …), with automatic background ingestion (no setup CLI).",
+  "description": "Reflect-only Hindsight long-term memory for coding agents (harness-pluggable: opencode, \u2026), with automatic background ingestion (no setup CLI).",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -43,7 +43,8 @@
     "hindsight-droid-stop-hook": "dist/droid-stop-hook.js",
     "hindsight-kimi-hook": "dist/kimi-hook.js",
     "hindsight-kimi-sessionstart-hook": "dist/kimi-sessionstart-hook.js",
-    "hindsight-kimi-stop-hook": "dist/kimi-stop-hook.js"
+    "hindsight-kimi-stop-hook": "dist/kimi-stop-hook.js",
+    "hindsight-project-registry": "dist/project-registry.js"
   },
   "exports": {
     ".": {
@@ -85,9 +86,11 @@
     "skill:build": "node scripts/build-skill.mjs",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run clean && npm run skill:build && npm run build",
-    "test": "vitest run --exclude '**/*.e2e.test.ts'",
+    "test": "HINDSIGHT_BANK_RESOLUTION=upstream vitest run --exclude '**/*.e2e.test.ts'",
     "test:dcode-e2e": "npm run build && HINDSIGHT_DCODE_E2E=1 vitest run src/dcode-plugin.e2e.test.ts",
-    "test:harness-e2e": "npm run build && HINDSIGHT_HARNESS_E2E=1 vitest run src/harness.e2e.test.ts"
+    "test:harness-e2e": "npm run build && HINDSIGHT_HARNESS_E2E=1 vitest run src/harness.e2e.test.ts",
+    "test:shared": "vitest run src/core/shared-memory.integration.test.ts",
+    "test:shared-e2e": "npm run build && vitest run src/shared-memory.e2e.test.ts"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -96,6 +99,7 @@
     "@opencode/plugin": "^2.0.3",
     "@types/node": "^26.1.0",
     "@vectorize-io/hindsight-all": "^0.8.6",
+    "js-tiktoken": "^1.0.21",
     "jsonc-parser": "^3.3.1",
     "smol-toml": "^1.8.0",
     "tsup": "^8.3.0",
@@ -110,5 +114,8 @@
     "ip-address": ">=10.3.1 <11.0.0",
     "postcss": ">=8.5.23 <9.0.0",
     "vite": ">=6.4.3 <7.0.0"
+  },
+  "engines": {
+    "node": ">=24.0.0"
   }
 }

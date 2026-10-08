@@ -1,3 +1,6 @@
+import { resolveHostMemory } from "./host-client";
+import { type PermissionMode } from "./tool-context";
+import { retryConclusions } from "./conclusions";
 /**
  * Host adapter runtime for PERSISTENT-PLUGIN harnesses (opencode, opencode2, Kilo, Cline, dsh, pi,
  * Prime Agent — every host that loads us once and keeps us). It delegates SessionStart and
@@ -36,6 +39,48 @@ import { sessionCacheFile, writeSessionCache } from "./session-cache";
 const HARNESS = "opencode";
 
 export class RuntimeCore {
+  private shutdown = new AbortController();
+  private refreshMappedMemory(): boolean {
+    if (this.cfg.bankResolution !== "registry") return !this.cfg.disabled;
+    const live = resolveHostMemory(this.harness, this.projectDir);
+    if (
+      live.bankId !== this.bankId ||
+      live.client.apiUrl !== this.client.apiUrl ||
+      live.client.apiToken !== this.client.apiToken ||
+      live.cfg.projectRegistryFile !== this.cfg.projectRegistryFile
+    ) {
+      this.injection.clear();
+      this.lastInjection = "";
+      this.sharedPagesReady = false;
+    }
+    live.client.bindCancellation(this.shutdown.signal);
+    this.client = live.client;
+    this.bankId = live.bankId;
+    this.cfg = live.cfg;
+    return !live.cfg.disabled;
+  }
+  private deliveryTimer?: ReturnType<typeof setInterval>;
+  dispose(): void {
+    this.shutdown.abort();
+    if (this.deliveryTimer) clearInterval(this.deliveryTimer);
+    this.deliveryTimer = undefined;
+  }
+  private sharedPagesReady = false;
+  async prepareSharedPages(mode: PermissionMode): Promise<void> {
+    if (
+      !this.refreshMappedMemory() ||
+      this.cfg.bankResolution !== "registry" ||
+      mode !== "normal" ||
+      this.sharedPagesReady
+    )
+      return;
+    this.sharedPagesReady = true;
+    try {
+      await this.client.seedPages(buildPageTrigger(this.cfg), this.cfg.pages, this.cfg.customPages);
+    } catch {
+      this.sharedPagesReady = false;
+    }
+  }
   private readonly injection = new Map<string, string>(); // sessionId -> this turn's injection block
   private readonly turnCount = new Map<string, number>(); // sessionId -> user-turn counter (cadence)
   private readonly sessionState = new Map<string, { startTs: string; retainedTurns: number }>();
@@ -51,9 +96,9 @@ export class RuntimeCore {
   private notify?: (title: string, message: string) => void;
 
   constructor(
-    private readonly client: HindsightClient,
-    private readonly bankId: string,
-    private readonly cfg: Config,
+    private client: HindsightClient,
+    private bankId: string,
+    private cfg: Config,
     /**
      * Which persistent-plugin host loaded us. Scopes diagnostics, the session cache file and the
      * retained transcript's harness field, so Kilo sessions don't masquerade as opencode ones.
@@ -64,7 +109,14 @@ export class RuntimeCore {
      *  `{gitProject}` in retainTags names the repo the bank was derived from. */
     private readonly projectDir: string = process.cwd()
   ) {
+    if (cfg.bankResolution === "registry") this.client.bindCancellation(this.shutdown.signal);
     setLogLevel(cfg.logLevel);
+    if (cfg.bankResolution === "registry") {
+      this.deliveryTimer = setInterval(() => {
+        if (this.refreshMappedMemory()) void retryConclusions(this.client).catch(() => {});
+      }, 30000);
+      this.deliveryTimer.unref();
+    }
   }
 
   setNotifier(notify: (title: string, message: string) => void): void {
@@ -82,6 +134,7 @@ export class RuntimeCore {
 
   /** The hindsight_* knowledge + recall tools, bound to this bank, for the harness to register natively. */
   toolSpecs(): ToolSpec[] {
+    if (!this.refreshMappedMemory()) return [];
     return buildKnowledgeTools(this.client, this.bankId, {
       repoDir: this.projectDir,
       harness: this.harness,
@@ -161,6 +214,12 @@ export class RuntimeCore {
    * identical across hosts while this adapter retains only delivery-specific state.
    */
   async onPrompt(sessionId: string | undefined, prompt: string): Promise<void> {
+    if (!this.refreshMappedMemory()) {
+      if (sessionId) this.injection.delete(sessionId);
+      this.lastInjection = "";
+      return;
+    }
+    if (this.cfg.bankResolution === "registry") void retryConclusions(this.client).catch(() => {});
     if (process.env.HINDSIGHT_DISABLE_HOOKS) return; // anti-recursion (see seedIfCold)
     if (!sessionId || !prompt.trim()) return;
     const turns = (this.turnCount.get(sessionId) ?? 0) + 1;
@@ -187,7 +246,7 @@ export class RuntimeCore {
     // plugin load: that one is a process-lifetime snapshot, so a host started before the pages
     // existed told every later session "No knowledge pages yet" while the same turn's memory block
     // listed pages by id (#4607).
-    if (turns === 1) {
+    if (turns === 1 && this.cfg.bankResolution !== "registry") {
       blocks.push(
         buildKnowledgePreamble(output.pages, {
           reflectOnNewGoals: this.cfg.autoInject !== "reflect",

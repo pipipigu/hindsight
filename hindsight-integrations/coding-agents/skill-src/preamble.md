@@ -9,7 +9,11 @@ This machine runs the `hindsight-coding-agents` plugin: long-term project memory
 sessions, backed by a Hindsight server. You (the agent) are already wired into it — this skill
 explains what happens automatically, which tools you have, and how to configure or debug it.
 
-## What happens automatically (no action needed)
+## Registry mode (this fork's default)
+
+Projects use the independent directory registry, not Git-derived bank names. Unmapped projects are inactive. Automatic conversation capture and Git import are off. Save only new durable preferences, decisions, verified facts or reusable debugging conclusions with `hindsight_save_conclusion(content, evidence)`; never save routine progress or guesses, and do not save on a quota. Only `completed` confirms extraction. Plan or unknown host permissions are read-only. The five knowledge pages remain automatic. The behavior described below applies to explicit upstream compatibility mode.
+
+## Upstream-mode automatic behavior
 
 - **Per-repo memory bank**: each repository resolves to a bank (shown in the session banner:
   `↳ memory bank “coding-agent::<repo>”`). Worktrees share the main repo's bank.

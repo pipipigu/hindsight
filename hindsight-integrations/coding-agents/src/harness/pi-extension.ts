@@ -1,3 +1,4 @@
+import { permissionMode, type PermissionMode } from "../core/tool-context";
 /**
  * Shared entrypoint factory for the pi-family EXTENSION hosts (pi and its fork Prime Agent).
  *
@@ -52,6 +53,7 @@ interface SessionManagerLike {
  *  carry is raised inside seedIfCold at extension load, before any handler has a `ctx` to notify
  *  through — so it is logged rather than toasted here, and the field is not declared. */
 interface ExtensionContext {
+  permissionMode?: unknown;
   sessionManager: SessionManagerLike;
 }
 
@@ -65,11 +67,22 @@ interface ToolDefinition {
   parameters: JsonSchema;
   execute(
     toolCallId: string,
-    params: Record<string, unknown>
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+    onUpdate?: unknown,
+    ctx?: ExtensionContext
   ): Promise<{ content: { type: "text"; text: string }[]; details: unknown }>;
 }
 
 interface ExtensionAPI {
+  on(event: "session_shutdown", handler: () => void): void;
+  registerCommand?(
+    name: string,
+    command: {
+      description: string;
+      handler: (args: string, ctx: ExtensionContext) => Promise<void> | void;
+    }
+  ): void;
   on(
     event: "before_agent_start",
     handler: (
@@ -95,15 +108,26 @@ export type ExtensionFactory = (pi: ExtensionAPI) => void;
  * spec's handler returns an MCP `{content:[{text}]}` result and never throws, so we surface the
  * joined text back to the model.
  */
-export function toPiTool(spec: ToolSpec): ToolDefinition {
+export function toPiTool(
+  spec: ToolSpec,
+  modeFor?: (ctx?: ExtensionContext) => PermissionMode
+): ToolDefinition {
   const parameters = z.toJSONSchema(z.object(spec.inputSchema)) as JsonSchema;
   return {
     name: spec.name,
     label: spec.name,
     description: spec.description,
     parameters,
-    async execute(_toolCallId: string, params: Record<string, unknown>) {
-      const r = await spec.handler(params);
+    async execute(
+      _toolCallId: string,
+      params: Record<string, unknown>,
+      _signal?: AbortSignal,
+      _onUpdate?: unknown,
+      ctx?: ExtensionContext
+    ) {
+      const r = modeFor
+        ? await spec.handler(params, { permission: modeFor(ctx) })
+        : await spec.handler(params);
       const text = r.content?.map((c) => c.text).join("\n") || "";
       return { content: [{ type: "text", text }], details: null };
     },
@@ -177,8 +201,42 @@ export function createPiExtension(harness: string): ExtensionFactory {
     const repoPath = process.cwd();
     const core = createRuntime(harness, repoPath);
     if (!core) return;
+    pi.on("session_shutdown", () => core.dispose());
 
-    for (const spec of core.toolSpecs()) pi.registerTool(toPiTool(spec));
+    const permissions = new Map<string, PermissionMode>();
+    const modeFor = (ctx?: ExtensionContext): PermissionMode => {
+      const native = permissionMode(ctx?.permissionMode);
+      return native !== "unknown"
+        ? native
+        : ctx
+          ? (permissions.get(ctx.sessionManager.getSessionId()) ?? "unknown")
+          : "unknown";
+    };
+    pi.registerCommand?.("hindsight-mode", {
+      description:
+        "Declare normal or plan memory permissions for this session; unknown stays read-only",
+      handler: async (args, ctx) => {
+        const mode = permissionMode(args.trim());
+        if (mode === "unknown") throw new Error("Use /hindsight-mode normal|plan");
+        permissions.set(ctx.sessionManager.getSessionId(), mode);
+        await core.prepareSharedPages(mode);
+      },
+    });
+    for (const spec of core.toolSpecs())
+      pi.registerTool(
+        toPiTool(
+          {
+            ...spec,
+            handler: async (args, context) => {
+              const bound = core.toolSpecs().find((t) => t.name === spec.name);
+              return bound
+                ? bound.handler(args, context)
+                : { isError: true, content: [{ type: "text", text: "project_memory_disabled" }] };
+            },
+          },
+          modeFor
+        )
+      );
 
     // Fire-and-forget cold seed (bank check + background git seed); the first
     // before_agent_start awaits it via createPiHooks.

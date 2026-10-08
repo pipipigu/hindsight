@@ -14,7 +14,7 @@
  * `--harness` flags rather than from a workspace, and their process ends long before a credential
  * can rotate under them.
  */
-import { applyBankConfig, loadConfig, type Config } from "./config";
+import { applyBankConfig, loadConfig, resolveConfig, type Config } from "./config";
 import { deriveBankIdOrSkip } from "./bank";
 import { HindsightClient } from "./hindsight";
 
@@ -28,11 +28,19 @@ export interface HostMemory {
 
 /** Resolve config for one workspace: env + file + `harnesses.<name>`, then the `banks.<id>`
  *  section for the bank that directory maps to, with `optInOnly` enforced. */
+export function loadHostConfig(harness: string): Config {
+  try {
+    return loadConfig({ harness });
+  } catch {
+    return resolveConfig({ disabled: true, bankResolution: "registry" });
+  }
+}
+
 export function resolveHostConfig(
   harness: string,
   directory: string
 ): { cfg: Config; bankId: string } {
-  const cfg0 = loadConfig({ harness });
+  const cfg0 = loadHostConfig(harness);
   // A globally disabled plugin stops HERE, before bank derivation: `disabled` exists to be a
   // zero-overhead baseline — the same agent with no memory — not merely a silent one. Callers
   // return early on `cfg.disabled`, so the empty bank id never reaches a request.
@@ -58,6 +66,10 @@ export function resolveHostMemory(harness: string, directory: string): HostMemor
     cfg,
     bankId,
     client: new HindsightClient({
+      registryBinding:
+        cfg.bankResolution === "registry"
+          ? { directory, file: cfg.projectRegistryFile, networkConfigured: cfg.networkConfigured }
+          : undefined,
       apiUrl: cfg.apiUrl,
       apiToken: cfg.apiToken,
       bank: bankId,
@@ -75,6 +87,27 @@ export function resolveHostMemory(harness: string, directory: string): HostMemor
         const live = resolveHostConfig(harness, directory).cfg;
         return live.apiUrl === cfg.apiUrl ? live.apiToken : cfg.apiToken;
       },
+    }),
+  };
+}
+
+/** An inert desktop catalog: no request can use this launch directory without a signed rebind. */
+export function resolveCatalogMemory(harness: string, directory: string): HostMemory {
+  const cfg = loadHostConfig(harness);
+  return {
+    cfg,
+    bankId: "",
+    client: new HindsightClient({
+      apiUrl: cfg.apiUrl,
+      bank: "",
+      registryBinding: {
+        directory,
+        file: cfg.projectRegistryFile,
+        networkConfigured: cfg.networkConfigured,
+      },
+      observationScopes: cfg.observationScopes,
+      pageSearchLimit: cfg.pageSearchLimit,
+      recallOptions: cfg.recallOptions,
     }),
   };
 }
