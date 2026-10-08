@@ -60,6 +60,11 @@ export class RuntimeCore {
     return !live.cfg.disabled;
   }
   private deliveryTimer?: ReturnType<typeof setInterval>;
+  /** Resume previously authorized saves without requiring another model turn. */
+  async resumeConclusions(): Promise<void> {
+    if (this.refreshMappedMemory() && this.cfg.bankResolution === "registry")
+      await retryConclusions(this.client);
+  }
   dispose(): void {
     this.shutdown.abort();
     if (this.deliveryTimer) clearInterval(this.deliveryTimer);
@@ -113,7 +118,7 @@ export class RuntimeCore {
     setLogLevel(cfg.logLevel);
     if (cfg.bankResolution === "registry") {
       this.deliveryTimer = setInterval(() => {
-        if (this.refreshMappedMemory()) void retryConclusions(this.client).catch(() => {});
+        void this.resumeConclusions().catch(() => {});
       }, 30000);
       this.deliveryTimer.unref();
     }

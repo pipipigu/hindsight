@@ -1,4 +1,5 @@
 import { readRegistry } from "./core/project-registry";
+import { pendingConclusionWorkspaces } from "./core/conclusions";
 import { type PermissionMode } from "./core/tool-context";
 import { buildKnowledgeTools } from "./core/knowledge-tools";
 /**
@@ -56,6 +57,8 @@ interface DshSession {
 
 interface DshAgent {
   readonly session: DshSession;
+  /** Services such as planMode are scoped to the calling agent's preset. */
+  readonly ctx?: { get?(name: string): unknown };
 }
 
 /** A `user/message` as dsh's pre-step decision carries it. */
@@ -375,8 +378,12 @@ export function toDshParameters(spec: ToolSpec): Record<string, unknown> {
 }
 
 /** The tool bodies return MCP-shaped results and never throw; dsh wants a value or a throw. */
-async function runSpec(spec: ToolSpec, args: Record<string, unknown>): Promise<string> {
-  const result = await spec.handler(args);
+export async function runDshTool(
+  spec: ToolSpec,
+  args: Record<string, unknown>,
+  permission: PermissionMode
+): Promise<string> {
+  const result = await spec.handler(args, { permission });
   const text = (result.content || []).map((block) => block.text).join("\n");
   // dsh normalizes a thrown tool body into an isError result with this message, which is exactly
   // what our isError:true means — mapping it any other way would report a failure as a success.
@@ -427,8 +434,7 @@ function registerTools(
         if (!workspace) return "Hindsight memory is disabled for this workspace.";
         const bound = workspace.core.toolSpecs().find((candidate) => candidate.name === spec.name);
         if (!bound) return `Hindsight tool ${spec.name} is unavailable.`;
-        const result = await bound.handler(args, { permission: modeFor(exec?.agent) });
-        return result.content.map((c) => c.text).join("\n");
+        return runDshTool(bound, args, modeFor(exec?.agent));
       },
     });
   }
@@ -450,10 +456,59 @@ function specsOf(workspace: Workspace): ToolSpec[] {
 
 // ── cordis entrypoint ───────────────────────────────────────────────────────────
 
-/**
- * Bind the memory lifecycle for the lifetime of `ctx`. Every listener is fail-open: RuntimeCore
- * never throws, and a workspace we cannot resolve simply leaves that session unmemoried.
- */
+/** Read permission state from the caller's scoped preset, never the plugin's global context. */
+export function dshPermissionMode(agent?: DshAgent): PermissionMode {
+  if (!agent) return "unknown";
+  try {
+    const plan = agent.ctx?.get?.("planMode") as
+      | {
+          get?: (a: DshAgent) => { active?: boolean; pending?: boolean };
+          loggedActiveAtLastHeader?: (s: DshSession) => boolean | undefined;
+        }
+      | undefined;
+    if (!plan) {
+      // Preset services can be isolated below agent.ctx. The public projection service still
+      // owns the authoritative logged state and pending human /plan command selection.
+      const projections = agent.ctx?.get?.("sessionProjections") as
+        { stateOf?(session: DshSession, key: string): unknown } | undefined;
+      const state = projections?.stateOf?.(agent.session, "plan") as
+        | {
+            active?: unknown;
+            wanted?: unknown;
+            running?: { wanted?: unknown } | null;
+            activeAtLastHeader?: unknown;
+          }
+        | undefined;
+      if (!state || typeof state.active !== "boolean") return "unknown";
+      const wanted = state.running?.wanted ?? state.wanted;
+      if (
+        (wanted != null && typeof wanted !== "boolean") ||
+        (state.activeAtLastHeader != null && typeof state.activeAtLastHeader !== "boolean")
+      )
+        return "unknown";
+      return state.active || wanted === true || state.activeAtLastHeader === true
+        ? "plan"
+        : "normal";
+    }
+    const state = plan?.get?.(agent);
+    const header = plan?.loggedActiveAtLastHeader?.(agent.session);
+    if (
+      (state?.pending !== undefined && typeof state.pending !== "boolean") ||
+      (header !== undefined && typeof header !== "boolean")
+    )
+      return "unknown";
+    if (state?.active === true || state?.pending === true || header === true) return "plan";
+    return state?.active === false ? "normal" : "unknown";
+  } catch (error) {
+    diag(HARNESS, "permission_unavailable", {
+      session: agent.session.header.id,
+      reason: error instanceof Error ? error.message.slice(0, 200) : "plan_state_unreadable",
+    });
+    return "unknown";
+  }
+}
+
+/** Bind listeners and tools to the owning Cordis fiber. */
 export function apply(ctx: DshContext): void {
   ctx.effect?.(
     () => () => {
@@ -462,29 +517,19 @@ export function apply(ctx: DshContext): void {
     },
     "hindsight.shared-delivery"
   );
-  const modeFor = (agent?: DshAgent): PermissionMode => {
-    if (!agent) return "unknown";
-    const plan = ctx.get?.("planMode") as
-      | {
-          get?: (a: DshAgent) => { active?: boolean; pending?: boolean };
-          loggedActiveAtLastHeader?: (s: DshSession) => boolean | undefined;
-        }
-      | undefined;
+  const cfg = loadHostConfig(HARNESS);
+  if (!cfg.disabled && cfg.bankResolution === "registry") {
     try {
-      const state = plan?.get?.(agent);
-      const header = plan?.loggedActiveAtLastHeader?.(agent.session);
-      if (
-        (state?.pending !== undefined && typeof state.pending !== "boolean") ||
-        (header !== undefined && typeof header !== "boolean")
-      )
-        return "unknown";
-      if (state?.active === true || state?.pending === true || header === true) return "plan";
-      return state?.active === false ? "normal" : "unknown";
-    } catch {
-      return "unknown";
+      for (const pending of pendingConclusionWorkspaces()) {
+        if (pending.harness !== HARNESS) continue;
+        const workspace = workspaceFor(pending.cwd);
+        if (workspace) void workspace.core.resumeConclusions().catch(() => {});
+      }
+    } catch (error) {
+      log.warn(HARNESS, "pending conclusion recovery unavailable", { error: String(error) });
     }
-  };
-  const hooks = createDshHooks(workspaceForAgent, modeFor);
+  }
+  const hooks = createDshHooks(workspaceForAgent, dshPermissionMode);
   ctx.on("agent/session-start", hooks.sessionStart);
   // `prepend: true` puts this listener outermost, so the injection is appended AFTER every other
   // contributor's messages — the memory block reads last, closest to the model's turn.
@@ -494,7 +539,7 @@ export function apply(ctx: DshContext): void {
   // The tools registry is optional: a composition without it (a bare headless assembly) still gets
   // recall, injection and write-back.
   ctx.inject(["tools"], (toolCtx) => {
-    registerTools(toolCtx, process.cwd(), modeFor);
+    registerTools(toolCtx, process.cwd(), dshPermissionMode);
   });
 }
 

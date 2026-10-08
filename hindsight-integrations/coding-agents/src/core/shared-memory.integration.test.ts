@@ -15,6 +15,7 @@ import { cleanArguments, signToolContext, verifyToolContext } from "./tool-conte
 import { saveConclusion, retryConclusions, conclusionStatus } from "./conclusions";
 import { buildPageTrigger } from "./missions";
 import { selectTools } from "../mcp-server";
+import { apply as applyDsh } from "../dsh";
 
 let temp: string, project: string, registry: string, config: string;
 let server: Server | undefined;
@@ -393,6 +394,32 @@ describe("context and durable conclusions", () => {
     f.state.complete = true;
     await retryConclusions(resolveHostMemory("dsh", project).client);
     expect(conclusionStatus(f.memory.client)).toEqual([{ state: "completed", count: 1 }]);
+  });
+  it("resumes a persisted DSH save at plugin startup without a session or model turn", async () => {
+    const f = await api();
+    f.state.offline = true;
+    expect((await saveConclusion(f.memory.client, conclusion, "dsh")).state).toBe("pending");
+    f.state.offline = false;
+    f.state.complete = true;
+    let dispose: (() => void) | undefined;
+    applyDsh({
+      on: () => {},
+      inject: () => {},
+      effect: (effect) => {
+        dispose = effect();
+      },
+    });
+    try {
+      await vi.waitFor(() =>
+        expect(conclusionStatus(f.memory.client)).toEqual([{ state: "completed", count: 1 }])
+      );
+      expect(
+        f.calls.filter((c) => c.method === "POST" && c.path.endsWith("/memories"))
+      ).toHaveLength(1);
+      expect(f.pages).toHaveLength(0);
+    } finally {
+      dispose?.();
+    }
   });
   it("never falls back when the conclusion strategy is absent", async () => {
     const f = await api();

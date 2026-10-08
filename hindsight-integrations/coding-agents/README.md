@@ -12,6 +12,8 @@ bank in the background as you work.
 
 下文保留上游能力说明；本 fork 的默认行为以上述说明为准，`bankResolution: "upstream"` 可显式运行上游兼容模式。
 
+DSH 本地安装使用 `dsh plugin --profile <profile> add link:<本地包绝对路径>`，切换时关闭旧插件自动召回并重启。写入权限取自调用会话的宿主计划状态；插件启动即恢复待发送结论，无须再发送提问。已有库若需只读保留页面，可在 `banks.<bankId>.pages` 将五类默认页面设为 `false`。
+
 The premise: most of a real fix is derivable from the code, but the _last mile_ often hinges on a
 project-specific decision that isn't in the code at all — a rounding rule, a retry allowlist, a
 tie-break policy. Those decisions live in git history and past conversations. This package puts them
