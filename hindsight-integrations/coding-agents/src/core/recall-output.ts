@@ -10,6 +10,10 @@ const fields = [
   "occurred_start",
   "occurred_end",
   "attachments",
+  "state",
+  "invalidation_reason",
+  "invalidated_at",
+  "edited_at",
 ];
 // Keep provenance and evidence state, including false/zero values. The previous denylist kept
 // growing as importer internals (agent ids, layer ids, hashes) reached the model in every result.
@@ -118,7 +122,10 @@ export function formatRecallResponse(
     const available = ids.map(reference).filter((ref) => ref !== undefined);
     if (available.length) out.source_refs = available;
     const missing = ids.filter((id) => !Object.hasOwn(facts, id)).length;
-    if (missing) out.missing_source_count = missing;
+    if (missing) {
+      out.missing_source_count = missing;
+      out.source_ids = ids.filter((id) => !Object.hasOwn(facts, id));
+    }
     if (typeof row.chunk_id === "string" && chunkRefs.has(row.chunk_id))
       out.chunk_ref = chunkRefs.get(row.chunk_id);
     return out;

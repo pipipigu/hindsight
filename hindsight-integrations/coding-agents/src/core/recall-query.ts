@@ -26,11 +26,34 @@ const tagGroup: z.ZodType<TagGroup> = z.lazy(() =>
 
 /** The public Recall request options; the project bank is supplied exclusively by the host. */
 export const recallQueryShape = {
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(10)
+    .optional()
+    .describe("Compact result count; default 5, in server order"),
+  output_tokens: z
+    .number()
+    .int()
+    .min(1024)
+    .max(3000)
+    .optional()
+    .describe(
+      "Whole compact JSON token estimate (segmented cl100k_base); default 3000, including evidence and provenance"
+    ),
+  seen_ids: z
+    .array(z.string().min(1).max(128))
+    .max(100)
+    .optional()
+    .describe(
+      "IDs whose full evidence is still visible in this conversation; omit their repeated text. Use read_memory if a reference is no longer visible"
+    ),
   output_format: z
     .enum(["compact", "raw"])
     .optional()
     .describe(
-      "compact (default): text, provenance, dates and evidence status; entity details only when requested. raw: full API JSON. trace=true defaults to raw unless overridden"
+      "compact (default): at most 5 ranked facts within a whole-response budget; read_memory retrieves omitted details. raw: full API JSON, only for an explicitly requested detailed/debug inspection. trace=true defaults to raw unless overridden"
     ),
   query: z
     .string()
@@ -102,7 +125,14 @@ const { types: _types, ...observationShape } = recallQueryShape;
 export const observationsQueryShape = observationShape;
 const recallSchema = z.object(recallQueryShape).strict();
 const observationSchema = z.object(observationsQueryShape).strict();
-export type RecallQuery = Omit<z.infer<typeof recallSchema>, "output_format">;
+export type RecallQuery = Omit<
+  z.infer<typeof recallSchema>,
+  "output_format" | "limit" | "output_tokens" | "seen_ids"
+>;
+export type RecallView = Pick<
+  z.infer<typeof recallSchema>,
+  "limit" | "output_tokens" | "seen_ids" | "output_format" | "trace"
+>;
 
 export function recallOutputFormat(args: unknown): "compact" | "raw" {
   const options = args as { output_format?: "compact" | "raw"; trace?: boolean };
@@ -133,7 +163,13 @@ export function parseRecallQuery(args: unknown, observations: boolean): RecallQu
       throw new Error("invalid_temporal_window");
   }
   // Formatting belongs to the agent adapter, never to the server's Recall request.
-  const { output_format: _format, ...query } = parsed;
+  const {
+    output_format: _format,
+    limit: _limit,
+    output_tokens: _output,
+    seen_ids: _seen,
+    ...query
+  } = parsed;
   return {
     budget: "mid",
     max_tokens: 4096,

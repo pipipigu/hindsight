@@ -30,6 +30,7 @@ const EXPECTED_TOOLS = [
   "hindsight_diagnose",
   "hindsight_search_observations",
   "hindsight_recall",
+  "hindsight_read_memory",
   "hindsight_search_knowledge_pages",
   "hindsight_list_knowledge_pages",
   "hindsight_read_knowledge_page",
@@ -39,7 +40,7 @@ const EXPECTED_TOOLS = [
 ];
 
 describe("buildKnowledgeTools", () => {
-  it("returns exactly the ten expected tools (as a set)", () => {
+  it("returns exactly the expected tools (as a set)", () => {
     const client = stubClient();
     const tools = buildKnowledgeTools(client, "repo-a");
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOLS].sort());

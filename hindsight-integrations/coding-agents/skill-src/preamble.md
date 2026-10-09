@@ -15,9 +15,11 @@ Projects use the independent directory registry, not Git-derived bank names. Unm
 
 主动查询先于本地文件与代码检索：具体事实优先 `hindsight_recall`，归纳经验用 `hindsight_search_observations`，概览与专题用知识页搜索，综合整理可直接用 `hindsight_reflect`。按需选择，不必全部调用；证据足够就停，补查只针对缺口。提案、历史报告与二次摘要须注明范围和时间；声称现行须有实施证据，导入时间不代表实施时间；不同模块不能直接拼接规则。推导须标明，冲突或缺失保留待确认；只凭记忆时不查本地。工具绑定当前项目库，保留服务端排序；`temporal_window` 影响排序，不是严格日期过滤。
 
-两个检索工具默认精简 JSON：保留正文、来源、时间与证据状态，隐藏空项、评分、内部元数据和实体列表，并附证据使用规则；`include.entities` 对象可按需取实体详情。F/C 引用分别对应 `sources` 中的事实与 `chunks` 中的原文，仅在本次结果有效；未返回的依据显示 `missing_source_count`，截断标志保留。`output_format: "raw"` 保留完整 API 响应；`trace: true` 未指定格式时也使用 raw。格式选择不影响排序。
+两个检索工具默认精简 JSON：按服务端顺序最多返回5条完整事实，整包限约3000 tokens（分段 cl100k_base 估算，实际模型用量不同），包含来源与规则。`limit` 可调至10，`output_tokens` 可降低；`max_tokens` 只管服务端正文。`matched_count` 是本次取到的候选数，`omitted_count` 是未展示数，非全库总数。长事实只给 `requires_read` 地址，不截成结论；用 `hindsight_read_memory(memory_id)` 按需读取，`section=original` 只读该事实自己的原文，`section=provenance` 读完整来源状态。长内容按 `next_offset` 和 `content_hash` 续读，证据或项目变化时从头读。`seen_ids` 仅填当前上下文仍有正文的旧ID；引用失效时重读。F/C 引用在本次结果内有效；`source_ids` 可读取未返回的支撑事实。实体、原文和支撑事实共享整包预算，优先完整事实。`output_format=raw` 保留完整 API；`trace=true` 未指定格式时也使用 raw，二者仅用于用户明确要求的详细调试。
 
 ## Upstream-mode automatic behavior
+
+知识页也按预算分页，续读用 `next_offset/content_hash`，生成描述按需用 `part=metadata`；Reflect 不变。
 
 - **Per-repo memory bank**: each repository resolves to a bank (shown in the session banner:
   `↳ memory bank “coding-agent::<repo>”`). Worktrees share the main repo's bank.

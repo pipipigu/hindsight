@@ -40,13 +40,43 @@ it("runs the built Codex/Claude context hook and real MCP stdio from an unrelate
       recallRequests.push(body);
       res.end(
         JSON.stringify({
-          results: [{ id: "read-only-fact", type: body.types[0], text: "Fixture memory evidence" }],
+          results: [
+            {
+              id: "11111111-1111-4111-8111-111111111111",
+              type: body.types[0],
+              text: "Fixture memory evidence",
+              source_fact_ids: body.include?.source_facts ? ["s"] : [],
+              chunk_id: body.include?.chunks ? "c" : null,
+            },
+          ],
           chunks: body.include?.chunks
             ? { c: { chunk_text: "Fixture original paragraph" } }
             : undefined,
           source_facts: body.include?.source_facts
             ? { s: { id: "s", text: "Fixture source fact" } }
             : undefined,
+        })
+      );
+      return;
+    }
+    if (req.url?.endsWith("/memories/11111111-1111-4111-8111-111111111111")) {
+      res.end(
+        JSON.stringify({
+          id: "11111111-1111-4111-8111-111111111111",
+          type: "world",
+          text: "Fixture addressed evidence",
+          state: "valid",
+          chunk_id: "p-fixture-owned-chunk",
+        })
+      );
+      return;
+    }
+    if (req.url === "/v1/default/chunks/p-fixture-owned-chunk") {
+      res.end(
+        JSON.stringify({
+          bank_id: "p-fixture",
+          chunk_id: "p-fixture-owned-chunk",
+          chunk_text: "Fixture addressed original",
         })
       );
       return;
@@ -114,6 +144,9 @@ it("runs the built Codex/Claude context hook and real MCP stdio from an unrelate
         query: "fixture evidence",
         max_tokens: 4096,
         budget: "mid",
+        limit: 5,
+        output_tokens: 2000,
+        seen_ids: [],
         include: {
           chunks: { max_tokens: 1000 },
           source_facts: { max_tokens: 2000 },
@@ -149,6 +182,36 @@ it("runs the built Codex/Claude context hook and real MCP stdio from an unrelate
       if (query.output_format === "raw")
         expect(data.source_facts.s.text).toBe("Fixture source fact");
       else expect(data.sources.F1.text).toBe("Fixture source fact");
+    }
+    for (const section of ["fact", "original"]) {
+      const readName = "hindsight_read_memory";
+      const args = { memory_id: "11111111-1111-4111-8111-111111111111", section };
+      expect((await client.callTool({ name: readName, arguments: args })).isError).toBe(true);
+      const readHook = spawnSync(
+        process.execPath,
+        [resolve("dist/shared-context-hook.js"), harness],
+        {
+          env,
+          input: JSON.stringify({
+            hook_event_name: "PreToolUse",
+            tool_name: `mcp__hindsight__${readName}`,
+            tool_input: args,
+            cwd: workspace,
+            session_id: "fixture",
+            permission_mode: "plan",
+          }),
+          encoding: "utf8",
+        }
+      );
+      expect(readHook.status).toBe(0);
+      const read = await client.callTool({
+        name: readName,
+        arguments: JSON.parse(readHook.stdout).hookSpecificOutput.updatedInput,
+      });
+      expect(read.isError, JSON.stringify(read)).not.toBe(true);
+      expect(JSON.stringify(read.content)).toContain(
+        section === "fact" ? "Fixture addressed evidence" : "Fixture addressed original"
+      );
     }
     const name = "hindsight_list_knowledge_pages";
     expect((await client.callTool({ name, arguments: {} })).isError).toBe(true);
@@ -222,12 +285,23 @@ it("runs the built Codex/Claude context hook and real MCP stdio from an unrelate
     await client.close();
     client = undefined;
   }
-  expect(requests.every((path) => path === "/version" || path.includes("/p-fixture/"))).toBe(true);
+  expect(
+    requests.every(
+      (path) =>
+        path === "/version" ||
+        path.includes("/p-fixture/") ||
+        path === "/v1/default/chunks/p-fixture-owned-chunk"
+    )
+  ).toBe(true);
   expect(recallRequests.map((r) => r.types)).toEqual([
     ["world", "experience"],
     ["observation"],
     ["world", "experience"],
     ["observation"],
   ]);
-  expect(recallRequests.every((r) => !("output_format" in r))).toBe(true);
+  expect(
+    recallRequests.every(
+      (r) => !["output_format", "limit", "output_tokens", "seen_ids"].some((key) => key in r)
+    )
+  ).toBe(true);
 }, 15000);

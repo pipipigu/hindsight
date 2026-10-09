@@ -141,6 +141,8 @@ describe("explicit memory queries", () => {
     expect(compact).toEqual({
       evidence_guidance: MEMORY_RESULT_GUIDE,
       result_count: 1,
+      matched_count: 1,
+      omitted_count: 0,
       results: [{ id: "m", text: "Lease renewal" }],
     });
     const explicit = JSON.parse(
@@ -243,7 +245,7 @@ describe("explicit memory queries", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("does not apply the automatic 2,000-token clipping to explicit results", async () => {
+  it("uses an addressed read marker for an oversized fact and preserves explicit raw inspection", async () => {
     const value = { results: [{ id: "long", text: "Source evidence paragraph. ".repeat(1800) }] };
     vi.stubGlobal(
       "fetch",
@@ -256,8 +258,15 @@ describe("explicit memory queries", () => {
     expect(JSON.parse((await tool.handler({ query: "source evidence" })).content[0].text)).toEqual({
       evidence_guidance: MEMORY_RESULT_GUIDE,
       result_count: 1,
-      ...value,
+      matched_count: 1,
+      omitted_count: 0,
+      results: [{ id: "long", requires_read: true }],
     });
+    expect(
+      JSON.parse(
+        (await tool.handler({ query: "source evidence", output_format: "raw" })).content[0].text
+      )
+    ).toEqual({ result_count: 1, ...value });
   });
 
   it("returns an empty successful result distinctly from a request failure", async () => {
@@ -270,6 +279,8 @@ describe("explicit memory queries", () => {
     expect(JSON.parse((await tool.handler({ query: "missing" })).content[0].text)).toEqual({
       evidence_guidance: MEMORY_RESULT_GUIDE,
       result_count: 0,
+      matched_count: 0,
+      omitted_count: 0,
       results: [],
     });
     vi.stubGlobal(

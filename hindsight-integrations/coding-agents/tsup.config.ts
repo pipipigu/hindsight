@@ -97,5 +97,7 @@ export default defineConfig({
     /^jsonc-parser/,
     // smol-toml likewise: installer.js parses ~/.grok/config.toml with it.
     /^smol-toml/,
+    // Explicit query budgets must also work from single-file hook/MCP installations.
+    /^js-tiktoken/,
   ],
 });

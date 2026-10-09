@@ -46,12 +46,7 @@ export interface KnowledgeNode {
  * retain API). The scalar modes are the server's; a `string[][]` declares the scopes explicitly.
  */
 export type ObservationScopes =
-  | "shared"
-  | "combined"
-  | "per_tag"
-  | "all_combinations"
-  | "per_source"
-  | string[][];
+  "shared" | "combined" | "per_tag" | "all_combinations" | "per_source" | string[][];
 
 /**
  * `per_source` is resolved HERE, per document, and never reaches the server: it expands to the
@@ -908,6 +903,52 @@ export class HindsightClient {
       )
         throw new Error("invalid_memory_response");
       return value as Record<string, unknown>;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Addressed reads remain bound to this project, including the bank carried by a chunk. */
+  async readMemory(
+    memoryId: string,
+    includeOriginal = false
+  ): Promise<{ memory: Record<string, unknown>; original?: Record<string, unknown> }> {
+    const identity = this.scopeIdentity;
+    const stop = new AbortController();
+    const timer = setTimeout(() => stop.abort(), 45000);
+    const read = async (url: string, missing: string) => {
+      const response = await this.req("GET", url, undefined, [], 45000, stop.signal);
+      if (response.status === 404) throw new Error(missing);
+      const value = await pageJson(response, 4 * 1024 * 1024);
+      if (this.registryBinding && this.scopeIdentity !== identity)
+        throw new Error("project_scope_changed");
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        throw new Error("invalid_memory_response");
+      return value as Record<string, unknown>;
+    };
+    try {
+      const memory = await read(
+        this.bankUrl(`/memories/${encodeURIComponent(memoryId)}`),
+        "memory_not_found"
+      );
+      if (
+        typeof memory.id !== "string" ||
+        memory.id.toLowerCase() !== memoryId.toLowerCase() ||
+        typeof memory.text !== "string"
+      )
+        throw new Error("invalid_memory_response");
+      if (!includeOriginal) return { memory };
+      if (typeof memory.chunk_id !== "string" || !memory.chunk_id)
+        throw new Error("memory_original_unavailable");
+      // The model cannot supply a chunk ID. It comes exclusively from the bank-scoped fact.
+      const original = await read(
+        `${this.apiUrl}/v1/default/chunks/${encodeURIComponent(memory.chunk_id)}`,
+        "memory_original_unavailable"
+      );
+      if (original.bank_id !== this.bank || original.chunk_id !== memory.chunk_id)
+        throw new Error("project_bank_mismatch");
+      if (typeof original.chunk_text !== "string") throw new Error("invalid_memory_response");
+      return { memory, original };
     } finally {
       clearTimeout(timer);
     }
