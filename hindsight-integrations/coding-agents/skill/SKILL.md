@@ -18,6 +18,8 @@ Projects use the independent directory registry, not Git-derived bank names. Unm
 
 主动查询先于本地文件与代码检索：知识专题使用 `hindsight_search_knowledge_pages`；归纳结论及支撑事实使用 `hindsight_search_observations`；具体事实使用 `hindsight_recall`；云端综合整理使用现有 `hindsight_reflect`。新检索工具支持 Recall 的类型、预算、token 上限、标签、时间排序、原文与追踪选项，保留服务端排序；主动查询不受自动注入的 2000 tokens 限制。`temporal_window` 影响排序，不是严格日期过滤。工具只读并绑定当前项目库。
 
+两个检索工具默认返回精简 JSON：保留正文、时间、可辨识来源与引用，隐藏空项、评分及索引字段。`source_refs` 的 F 编号在 `sources` 中对应已返回依据的原始记忆 ID，`chunk_ref` 的 C 编号对应 `chunks` 中的原文片段，均仅在本次结果中有效。未返回正文的来源只显示 `missing_source_count`；截断标志会保留。指定 `output_format: "raw"` 可返回完整 API 数据及所有来源 ID；请求 `trace: true` 且未指定格式时也使用 raw。格式选择不影响服务端检索。
+
 ## Upstream-mode automatic behavior
 
 - **Per-repo memory bank**: each repository resolves to a bank (shown in the session banner:

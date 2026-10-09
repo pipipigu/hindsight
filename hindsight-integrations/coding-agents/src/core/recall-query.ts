@@ -26,6 +26,12 @@ const tagGroup: z.ZodType<TagGroup> = z.lazy(() =>
 
 /** The public Recall request options; the project bank is supplied exclusively by the host. */
 export const recallQueryShape = {
+  output_format: z
+    .enum(["compact", "raw"])
+    .optional()
+    .describe(
+      "compact (default): readable evidence without empty/debug fields; raw: full API JSON. trace=true defaults to raw unless overridden"
+    ),
   query: z
     .string()
     .min(1)
@@ -96,10 +102,15 @@ const { types: _types, ...observationShape } = recallQueryShape;
 export const observationsQueryShape = observationShape;
 const recallSchema = z.object(recallQueryShape).strict();
 const observationSchema = z.object(observationsQueryShape).strict();
-export type RecallQuery = z.infer<typeof recallSchema>;
+export type RecallQuery = Omit<z.infer<typeof recallSchema>, "output_format">;
+
+export function recallOutputFormat(args: unknown): "compact" | "raw" {
+  const options = args as { output_format?: "compact" | "raw"; trace?: boolean };
+  return options.output_format ?? (options.trace ? "raw" : "compact");
+}
 
 export function parseRecallQuery(args: unknown, observations: boolean): RecallQuery {
-  const parsed: RecallQuery = observations
+  const parsed: z.infer<typeof recallSchema> = observations
     ? observationSchema.parse(args)
     : recallSchema.parse(args);
   if (!/[\p{L}\p{N}]/u.test(parsed.query)) throw new Error("invalid_memory_query");
@@ -121,11 +132,13 @@ export function parseRecallQuery(args: unknown, observations: boolean): RecallQu
     )
       throw new Error("invalid_temporal_window");
   }
+  // Formatting belongs to the agent adapter, never to the server's Recall request.
+  const { output_format: _format, ...query } = parsed;
   return {
     budget: "mid",
     max_tokens: 4096,
     ...(observations ? { include: { entities: null, source_facts: { max_tokens: 2048 } } } : {}),
-    ...parsed,
+    ...query,
     types: observations
       ? ["observation"]
       : parsed.types === undefined

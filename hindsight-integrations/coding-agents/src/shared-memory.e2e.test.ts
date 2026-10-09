@@ -110,6 +110,7 @@ it("runs the built Codex/Claude context hook and real MCP stdio from an unrelate
     expect(tools.tools.map((t) => t.name)).toContain("hindsight_recall");
     for (const toolName of ["hindsight_recall", "hindsight_search_observations"]) {
       const query = {
+        output_format: toolName === "hindsight_recall" ? "raw" : "compact",
         query: "fixture evidence",
         max_tokens: 4096,
         budget: "mid",
@@ -144,6 +145,10 @@ it("runs the built Codex/Claude context hook and real MCP stdio from an unrelate
       expect(queryResult.isError, JSON.stringify(queryResult)).not.toBe(true);
       expect(JSON.stringify(queryResult.content)).toContain("Fixture memory evidence");
       expect(JSON.stringify(queryResult.content)).toContain("Fixture source fact");
+      const data = JSON.parse((queryResult.content as { type: string; text: string }[])[0].text);
+      if (query.output_format === "raw")
+        expect(data.source_facts.s.text).toBe("Fixture source fact");
+      else expect(data.sources.F1.text).toBe("Fixture source fact");
     }
     const name = "hindsight_list_knowledge_pages";
     expect((await client.callTool({ name, arguments: {} })).isError).toBe(true);
@@ -224,4 +229,5 @@ it("runs the built Codex/Claude context hook and real MCP stdio from an unrelate
     ["world", "experience"],
     ["observation"],
   ]);
+  expect(recallRequests.every((r) => !("output_format" in r))).toBe(true);
 }, 15000);
