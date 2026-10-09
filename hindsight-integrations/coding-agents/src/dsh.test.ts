@@ -329,20 +329,36 @@ describe("toDshParameters", () => {
         relates_to_page_id: { type: "string" },
       },
       required: ["title", "summary"],
+      additionalProperties: false,
     });
   });
 
   it("omits `required` for a tool that takes no arguments", () => {
-    expect(toDshParameters(spec({}))).toEqual({ type: "object", properties: {} });
+    expect(toDshParameters(spec({}))).toEqual({
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    });
   });
 
-  it("refuses a parameter shape the projection cannot express", () => {
-    expect(() => toDshParameters(spec({ limit: z.number() as never }))).toThrow(
-      /string parameters only/
+  it("preserves typed Recall options instead of projecting them as strings", () => {
+    const parameters = toDshParameters(
+      spec({
+        max_tokens: z.number().int().min(1).max(4096).optional(),
+        types: z.array(z.enum(["world", "experience"])).optional(),
+        trace: z.boolean().optional(),
+        include: z
+          .object({ chunks: z.object({ max_tokens: z.number().int() }).optional() })
+          .optional(),
+      })
     );
-    // The guard must see THROUGH `.optional()`, not treat every optional as a string.
-    expect(() => toDshParameters(spec({ limit: z.number().optional() as never }))).toThrow(
-      /string parameters only/
-    );
+    expect(parameters).toMatchObject({
+      properties: {
+        max_tokens: { type: "integer", minimum: 1, maximum: 4096 },
+        types: { type: "array", items: { type: "string", enum: ["world", "experience"] } },
+        trace: { type: "boolean" },
+        include: { type: "object", properties: { chunks: { type: "object" } } },
+      },
+    });
   });
 });

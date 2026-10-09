@@ -1,3 +1,5 @@
+import { MEMORY_SEARCH_GUIDE } from "./recall-guidance";
+
 export interface PageRef {
   id: string;
   title: string;
@@ -111,7 +113,11 @@ export interface ToolGuideOpts {
 function toolGuide(opts?: ToolGuideOpts): string {
   const extra = opts?.extra?.trim();
   return (
-    (opts?.reflectOnNewGoals ? PAGES_FIRST_ON_GOALS : "") + TOOL_GUIDE + (extra ? `\n${extra}` : "")
+    MEMORY_SEARCH_GUIDE +
+    "\n" +
+    (opts?.reflectOnNewGoals ? PAGES_FIRST_ON_GOALS : "") +
+    TOOL_GUIDE +
+    (extra ? `\n${extra}` : "")
   );
 }
 

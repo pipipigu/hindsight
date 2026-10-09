@@ -1,6 +1,7 @@
 import { createHash as identityHash } from "node:crypto";
 import { assertProjectBinding, resolveRegisteredProject } from "./project-registry";
 import type { RecallFact, RecallScores } from "./recall-evidence";
+import type { RecallQuery } from "./recall-query";
 /**
  * Harness-agnostic Hindsight HTTP client (raw fetch, no SDK dep).
  *
@@ -45,7 +46,12 @@ export interface KnowledgeNode {
  * retain API). The scalar modes are the server's; a `string[][]` declares the scopes explicitly.
  */
 export type ObservationScopes =
-  "shared" | "combined" | "per_tag" | "all_combinations" | "per_source" | string[][];
+  | "shared"
+  | "combined"
+  | "per_tag"
+  | "all_combinations"
+  | "per_source"
+  | string[][];
 
 /**
  * `per_source` is resolved HERE, per document, and never reaches the server: it expands to the
@@ -875,15 +881,40 @@ export class HindsightClient {
     }
   }
 
-  /**
-   * Raw recall with no LLM in the loop, so it still answers when reflect's synthesis times out or
-   * 5xxs. The body is `recallOptions` (consolidated observations by default) — a bank that grows
-   * no observations widens it rather than getting nothing back. Returns the texts in rank order.
-   *
-   * The name predates `recallOptions` (the observation type used to be hardcoded here) and is
-   * kept deliberately: this is the client's published surface, so renaming it would break
-   * importers for a cosmetic gain. The doc above is the contract, not the name.
-   */
+  /** Explicit tools use the same request/response as the web Recall analyzer, with no automatic
+   * injection settings, local reranking or token clipping applied to the returned evidence. */
+  async queryMemories(query: RecallQuery): Promise<Record<string, unknown>> {
+    const identity = this.scopeIdentity;
+    const stop = new AbortController();
+    const timer = setTimeout(() => stop.abort(), 45000);
+    try {
+      const response = await this.req(
+        "POST",
+        this.bankUrl("/memories/recall"),
+        query,
+        [],
+        45000,
+        stop.signal
+      );
+      if (response.status === 404) throw new Error("project_bank_missing");
+      const value = await pageJson(response, 4 * 1024 * 1024);
+      if (this.registryBinding && this.scopeIdentity !== identity)
+        throw new Error("project_scope_changed");
+      if (
+        !value ||
+        typeof value !== "object" ||
+        Array.isArray(value) ||
+        !Array.isArray((value as Record<string, unknown>).results)
+      )
+        throw new Error("invalid_memory_response");
+      return value as Record<string, unknown>;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Automatic/legacy recall uses the configured `recallOptions` (observations by default).
+   * The historical name is kept for existing callers; explicit tools use queryMemories instead. */
   async recallObservations(query: string, opts: { timeoutMs: number }): Promise<string[]> {
     return (await this.recallCandidates(query, opts)).map((row) => row.text);
   }

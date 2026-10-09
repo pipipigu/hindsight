@@ -16,6 +16,8 @@ explains what happens automatically, which tools you have, and how to configure 
 
 Projects use the independent directory registry, not Git-derived bank names. Unmapped projects are inactive. Automatic conversation capture and Git import are off. Save only new durable preferences, decisions, verified facts or reusable debugging conclusions with `hindsight_save_conclusion(content, evidence)`; never save routine progress or guesses, and do not save on a quota. Only `completed` confirms extraction. Plan or unknown host permissions are read-only. The five knowledge pages remain automatic. The behavior described below applies to explicit upstream compatibility mode.
 
+主动查询先于本地文件与代码检索：知识专题使用 `hindsight_search_knowledge_pages`；归纳结论及支撑事实使用 `hindsight_search_observations`；具体事实使用 `hindsight_recall`；云端综合整理使用现有 `hindsight_reflect`。新检索工具支持 Recall 的类型、预算、token 上限、标签、时间排序、原文与追踪选项，保留服务端排序；主动查询不受自动注入的 2000 tokens 限制。`temporal_window` 影响排序，不是严格日期过滤。工具只读并绑定当前项目库。
+
 ## Upstream-mode automatic behavior
 
 - **Per-repo memory bank**: each repository resolves to a bank (shown in the session banner:

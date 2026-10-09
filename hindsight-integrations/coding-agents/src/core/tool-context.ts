@@ -42,12 +42,22 @@ export function cleanArguments(input: Record<string, unknown>): Record<string, u
 }
 function fingerprint(input: Record<string, unknown>): string {
   const args = cleanArguments(input);
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === "object")
+      return Object.fromEntries(
+        Object.keys(value)
+          .sort()
+          .map((key) => [key, canonical((value as Record<string, unknown>)[key])])
+      );
+    return value;
+  };
   return createHash("sha256")
     .update(
       JSON.stringify(
         Object.keys(args)
           .sort()
-          .map((k) => [k, args[k]])
+          .map((k) => [k, canonical(args[k])])
       )
     )
     .digest("hex");

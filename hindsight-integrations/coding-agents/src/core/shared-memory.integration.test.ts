@@ -302,6 +302,34 @@ describe("bounded per-turn recall", () => {
     expect(follow.reason).toBe("followup");
     expect(outputTokens(follow.text)).toBeLessThanOrEqual(2000);
   });
+  it("keeps the active-query instruction on a retrieval miss but skips confirmations", async () => {
+    const f = await api();
+    const cacheFile = join(temp, "guide-cache.json");
+    const client = {
+      ...f.memory.client,
+      bank: "p-project",
+      scopeIdentity: "fixture",
+      recallObservations: async () => [],
+      searchKnowledgePages: async () => [],
+    };
+    const first = await buildHookOutput({
+      harness: "dsh",
+      prompt: "Why does the cache eviction policy work this way?",
+      cfg: f.memory.cfg,
+      client: client as never,
+      cacheFile,
+    });
+    expect(first.context).toContain("hindsight_search_observations");
+    expect(first.context).toContain("完成主动查询后");
+    const ack = await buildHookOutput({
+      harness: "dsh",
+      prompt: "好的",
+      cfg: f.memory.cfg,
+      client: client as never,
+      cacheFile,
+    });
+    expect(ack.context).toBeUndefined();
+  });
   it("rebinds a persistent host after the mapping changes and drops old topic context", async () => {
     const f = await api(),
       core = new RuntimeCore(f.memory.client, "p-project", f.memory.cfg, "pi", project);
@@ -314,7 +342,8 @@ describe("bounded per-turn recall", () => {
         JSON.stringify({ projects: [{ root: project, bankId: "p-rebound", enabled: true }] })
       );
       await core.onPrompt(session, "这个怎么修改");
-      expect(core.getInjection(session)).toBeFalsy();
+      expect(core.getInjection(session)).toContain("hindsight_search_observations");
+      expect(core.getInjection(session)).not.toContain("p-project");
       await core.onPrompt(session, "Hindsight project mapping");
       expect(core.getInjection(session)).toContain("p-rebound");
       expect(f.calls.some((c) => c.path.includes("/p-rebound/"))).toBe(true);
@@ -359,6 +388,32 @@ describe("context and durable conclusions", () => {
       "expired_or_changed"
     );
     expect(cleanArguments({ ...conclusion, _context: token })).toEqual(conclusion);
+  });
+  it("accepts reordered nested query keys but rejects changed values and array order", () => {
+    const input = {
+      query: "question",
+      tags: ["a", "b"],
+      include: { chunks: { max_tokens: 1000 }, entities: null },
+    };
+    const token = signToolContext(
+      { cwd: project, harness: "codex", session: "s", mode: "plan", tool: "hindsight_recall" },
+      input
+    );
+    const reordered = {
+      include: { entities: null, chunks: { max_tokens: 1000 } },
+      tags: ["a", "b"],
+      query: "question",
+    };
+    expect(verifyToolContext(token, "hindsight_recall", reordered).mode).toBe("plan");
+    expect(() =>
+      verifyToolContext(token, "hindsight_recall", {
+        ...reordered,
+        include: { entities: null, chunks: { max_tokens: 2000 } },
+      })
+    ).toThrow("expired_or_changed");
+    expect(() =>
+      verifyToolContext(token, "hindsight_recall", { ...reordered, tags: ["b", "a"] })
+    ).toThrow("expired_or_changed");
   });
   it("rejects writes in plan and unknown mode before any request", async () => {
     const f = await api(),

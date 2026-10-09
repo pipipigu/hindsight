@@ -18,13 +18,15 @@ describe("selectTools", () => {
     expect(selectTools(cfg, stubClient, "b")).toEqual([]);
   });
 
-  it("returns the eight hindsight_* tool specs when enabled", () => {
+  it("returns the ten hindsight_* tool specs when enabled", () => {
     const cfg = resolveConfig({});
     const tools = selectTools(cfg, stubClient, "b");
     expect(tools.map((t) => t.name).sort()).toEqual(
       [
         "hindsight_sync_status",
         "hindsight_diagnose",
+        "hindsight_search_observations",
+        "hindsight_recall",
         "hindsight_search_knowledge_pages",
         "hindsight_list_knowledge_pages",
         "hindsight_read_knowledge_page",
@@ -220,6 +222,8 @@ describe("buildMcpServer", () => {
     const expected = {
       hindsight_sync_status: readOnly,
       hindsight_diagnose: readOnly,
+      hindsight_search_observations: readOnly,
+      hindsight_recall: readOnly,
       hindsight_search_knowledge_pages: readOnly,
       hindsight_list_knowledge_pages: readOnly,
       hindsight_read_knowledge_page: readOnly,

@@ -29,12 +29,28 @@ it("runs the built Codex/Claude context hook and real MCP stdio from an unrelate
     JSON.stringify({ projects: [{ root: workspace, bankId: "p-fixture", enabled: true }] })
   );
   const requests: string[] = [];
+  const recallRequests: Record<string, unknown>[] = [];
   server = createServer(async (req, res) => {
     requests.push(req.url!);
     res.setHeader("content-type", "application/json");
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
+    if (req.url?.endsWith("/memories/recall")) {
+      recallRequests.push(body);
+      res.end(
+        JSON.stringify({
+          results: [{ id: "read-only-fact", type: body.types[0], text: "Fixture memory evidence" }],
+          chunks: body.include?.chunks
+            ? { c: { chunk_text: "Fixture original paragraph" } }
+            : undefined,
+          source_facts: body.include?.source_facts
+            ? { s: { id: "s", text: "Fixture source fact" } }
+            : undefined,
+        })
+      );
+      return;
+    }
     const value = req.url?.endsWith("/stats")
       ? { bank_id: "p-fixture" }
       : req.url === "/version"
@@ -90,6 +106,45 @@ it("runs the built Codex/Claude context hook and real MCP stdio from an unrelate
     );
     const tools = await client.listTools();
     expect(tools.tools.map((t) => t.name)).toContain("hindsight_save_conclusion");
+    expect(tools.tools.map((t) => t.name)).toContain("hindsight_search_observations");
+    expect(tools.tools.map((t) => t.name)).toContain("hindsight_recall");
+    for (const toolName of ["hindsight_recall", "hindsight_search_observations"]) {
+      const query = {
+        query: "fixture evidence",
+        max_tokens: 4096,
+        budget: "mid",
+        include: {
+          chunks: { max_tokens: 1000 },
+          source_facts: { max_tokens: 2000 },
+          entities: null,
+        },
+      };
+      expect((await client.callTool({ name: toolName, arguments: query })).isError).toBe(true);
+      const queryHook = spawnSync(
+        process.execPath,
+        [resolve("dist/shared-context-hook.js"), harness],
+        {
+          env,
+          input: JSON.stringify({
+            hook_event_name: "PreToolUse",
+            tool_name: `mcp__hindsight__${toolName}`,
+            tool_input: query,
+            cwd: workspace,
+            session_id: "fixture",
+            permission_mode: "plan",
+          }),
+          encoding: "utf8",
+        }
+      );
+      expect(queryHook.status).toBe(0);
+      const queryResult = await client.callTool({
+        name: toolName,
+        arguments: JSON.parse(queryHook.stdout).hookSpecificOutput.updatedInput,
+      });
+      expect(queryResult.isError, JSON.stringify(queryResult)).not.toBe(true);
+      expect(JSON.stringify(queryResult.content)).toContain("Fixture memory evidence");
+      expect(JSON.stringify(queryResult.content)).toContain("Fixture source fact");
+    }
     const name = "hindsight_list_knowledge_pages";
     expect((await client.callTool({ name, arguments: {} })).isError).toBe(true);
     const hook = spawnSync(process.execPath, [resolve("dist/shared-context-hook.js"), harness], {
@@ -163,4 +218,10 @@ it("runs the built Codex/Claude context hook and real MCP stdio from an unrelate
     client = undefined;
   }
   expect(requests.every((path) => path === "/version" || path.includes("/p-fixture/"))).toBe(true);
+  expect(recallRequests.map((r) => r.types)).toEqual([
+    ["world", "experience"],
+    ["observation"],
+    ["world", "experience"],
+    ["observation"],
+  ]);
 }, 15000);

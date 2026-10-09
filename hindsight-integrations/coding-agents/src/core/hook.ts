@@ -1,4 +1,5 @@
 import { sharedRecall } from "./shared-recall";
+import { MEMORY_SEARCH_GUIDE } from "./recall-guidance";
 /**
  * Shared runtime for HOOK-based harnesses (Claude Code, Codex, Cursor CLI, ...).
  *
@@ -252,7 +253,14 @@ export async function buildHookOutput(args: {
       })),
       ...result.diagnostics,
     });
-    return { context: result.text || undefined, pages: [] };
+    return {
+      context:
+        result.text ||
+        (result.reason !== "acknowledgement" && result.reason !== "empty"
+          ? MEMORY_SEARCH_GUIDE + `\n项目记忆库：${client.bank ?? "unknown"}。`
+          : undefined),
+      pages: [],
+    };
   }
 
   // ── auto-inject: once per session, on the first prompt ────────────────────────
