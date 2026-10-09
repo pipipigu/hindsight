@@ -61,6 +61,49 @@ function makeClient(
 }
 
 describe("buildHookOutput", () => {
+  it.each(["dsh", "codex", "claude-code", "pi"])(
+    "injects rules without retrieval or old cached evidence for %s in registry tool-only mode",
+    async (harness) => {
+      mkdirSync(join(root, "cache"), { recursive: true });
+      writeFileSync(
+        cacheFile,
+        JSON.stringify({
+          turns: 4,
+          reflectAnswer: "STALE AUTOMATIC EVIDENCE",
+          pages: { atTurn: 4, list: [{ id: "old-page", title: "Old page" }] },
+          recallTurns: ["old-turn"],
+        })
+      );
+      const client = {
+        ...makeClient(),
+        bank: "mapped",
+        searchKnowledgePages: vi.fn(async () => []),
+        recallObservations: vi.fn(async () => []),
+      };
+      const out = await buildHookOutput({
+        harness,
+        prompt: "Which field and version apply to this component?",
+        cfg: resolveConfig({ bankResolution: "registry", toolGuideExtra: "Team evidence rule" }),
+        client,
+        cacheFile,
+      });
+      expect(out.context).toContain("后台自动检索已关闭");
+      expect(out.context).toContain("content 和 evidence");
+      expect(out.context).toContain("mapped");
+      expect(out.context).toContain("Team evidence rule");
+      expect(out.context).not.toMatch(/STALE AUTOMATIC|old-page|Old page/);
+      expect(out.pages).toEqual([]);
+      for (const method of [
+        "reflect",
+        "listPages",
+        "searchKnowledgePages",
+        "recallObservations",
+      ] as const)
+        expect(client[method]).not.toHaveBeenCalled();
+      expect(JSON.parse(readFileSync(cacheFile, "utf8"))).toEqual({ turns: 5 });
+    }
+  );
+
   it("turn 1: injects the reflect answer wrapped in the system-injection preamble", async () => {
     const cfg = resolveConfig({});
     const client = makeClient();

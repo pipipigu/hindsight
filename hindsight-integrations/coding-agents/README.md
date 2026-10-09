@@ -6,7 +6,7 @@ One package, several agents: a shared reflect-and-inject core with a thin entry 
 automatic — there is no setup command: a repo's git history and conversations flow into its memory
 bank in the background as you work.
 
-本 fork 要求 Node 24+，基于官方 0.8.0，默认使用独立目录映射。四端共用项目库，每轮相关提问直接检索记忆与知识页，7 秒共享预算、最多 2,000 tokens；简单确认跳过。对话采集、Git 导入、代码调查和自动升级默认关闭。长期结论使用 `hindsight_save_conclusion(content,evidence)`，策略缺失不回退；回执完成才算提取成功。知识页保留官方五类与按小时过期刷新，既有页面和库配置不覆盖。独立心智模型工具暂不提供。
+本 fork 要求 Node 24+，基于官方 0.8.0，默认使用独立目录映射。四端共用项目库，默认 `autoInject: "none"`，只注入查询与证据规则，由 Agent 主动选择工具；证据足够即停止，历史方案不等于现行实现。显式开启 `"recall"` 时仍有 7 秒、2,000 tokens 自动检索预算。对话采集、Git 导入、代码调查和自动升级默认关闭。长期结论使用 `hindsight_save_conclusion(content,evidence)`，策略缺失不回退；回执完成才算提取成功。知识页保留官方五类与按小时过期刷新，既有页面和库配置不覆盖。独立心智模型工具暂不提供。
 
 服务地址须显式配置。注册表默认 `~/.hindsight/projects.json`（`projects: [{root,bankId,name,enabled}]`），最深目录匹配，worktree 共用原项目库；未登记、停用或库不存在均不回退。一次性导入：`node dist/project-registry.js import 静态注册表 本机注册表 --output 新文件`；拒绝覆盖，初始只启用现有四库。先在隔离目录构建、测试与安装，不直接切换现有插件。Codex／Claude 需启用安装器新增的 PreToolUse Hook，工具 `_context` 由宿主签名；Pi 未提供权限态时由人类使用 `/hindsight-mode normal|plan` 指定，未指定只读。
 

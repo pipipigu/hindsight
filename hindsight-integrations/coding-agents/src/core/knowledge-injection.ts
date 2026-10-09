@@ -55,7 +55,8 @@ function indexLine(pages: PageRef[]): string {
  * context. (Omits hindsight_diagnose — pure troubleshooting, no workflow trigger.)
  */
 const TOOL_GUIDE =
-  "- hindsight_search_knowledge_pages(query) — FIRST STOP, and the way IN to everything below. The code " +
+  "- hindsight_recall(query) — prefer for concrete facts; hindsight_search_observations(query) — summarized experience and supporting facts. Stop when sufficient evidence is available.\n" +
+  "- hindsight_search_knowledge_pages(query) — search for project overviews and topics. Choose the tool that fits the question. The code " +
   "shows what is true today but not what was decided or why; memory shows what was decided or said " +
   "back then but not whether it still holds. Work built from either alone goes wrong: from code alone " +
   "it quietly re-litigates settled questions, from memory alone it acts on stale claims. Search " +
@@ -77,9 +78,9 @@ const TOOL_GUIDE =
   '"> 🧠 **From Hindsight memory (<page>)** — <the specific facts you drew on>". Rewriting a ' +
   "snippet in your own words does not make it yours. A search that turned up nothing useful needs " +
   "no mention at all — just carry on.\n" +
-  "- hindsight_list_knowledge_pages / hindsight_read_knowledge_page — BEFORE substantial work, list the pages and " +
-  "read the relevant ones to ground yourself in this repo's architecture, conventions, and past decisions instead " +
-  "of re-deriving them from the code; follow any [[page:<id>]] links you see.\n" +
+  "- hindsight_list_knowledge_pages — use for catalog questions, not as a required first step. " +
+  "hindsight_read_knowledge_page — read a relevant hit only when its snippet leaves an evidence gap; " +
+  "follow [[page:<id>]] links only to resolve that gap.\n" +
   "- hindsight_reflect(query) — when pages are too shallow and you need the WHY: deep reasoning over the " +
   "repo's full memory for the past decision and exact values that explain a behavior or bug (slower — " +
   'use deliberately, and credit results with a blockquote header "> 🧠 **From Hindsight memory** — <summary>").\n' +
@@ -93,18 +94,16 @@ const TOOL_GUIDE =
 
 /**
  * Any autoInject other than "reflect" means no first-prompt synthesis. Keep the pull trigger explicit,
- * but start with the curated pages: they are the fast path, while reflection is the slower fallback
- * when those pages do not contain enough depth for the new goal.
+ * and let the question choose the query tool rather than requiring a page-search chain.
  */
-const PAGES_FIRST_ON_GOALS =
-  "- The user just set a NEW task or goal → search the knowledge pages FIRST with " +
-  "hindsight_search_knowledge_pages. No synthesis is injected automatically in this configuration; " +
-  "call hindsight_reflect only when those pages are too shallow and deeper reasoning is needed.\n";
+const QUERY_ON_GOALS =
+  "- The user just set a NEW task or goal → choose the appropriate memory query tool. Concrete " +
+  "facts can go directly to hindsight_recall; a synthesis can go directly to hindsight_reflect. " +
+  "Do not require a page search or full-page read before either.\n";
 
 export interface ToolGuideOpts {
-  /** Add the new-goal pull trigger (no automatic synthesis: cfg.autoInject !== "reflect"). It used to send
-   *  the agent straight to hindsight_reflect; it now goes to the knowledge pages first and keeps
-   *  reflect for what they don't cover. The field name is unchanged so call sites stay stable. */
+  /** Add the new-goal pull trigger (cfg.autoInject !== "reflect"). Kept under its existing name
+   *  for adapter compatibility; the question chooses the tool, with no required page-first path. */
   reflectOnNewGoals?: boolean;
   /** cfg.toolGuideExtra: the team's own guidance, added after ours rather than replacing it. */
   extra?: string;
@@ -115,7 +114,7 @@ function toolGuide(opts?: ToolGuideOpts): string {
   return (
     MEMORY_SEARCH_GUIDE +
     "\n" +
-    (opts?.reflectOnNewGoals ? PAGES_FIRST_ON_GOALS : "") +
+    (opts?.reflectOnNewGoals ? QUERY_ON_GOALS : "") +
     TOOL_GUIDE +
     (extra ? `\n${extra}` : "")
   );

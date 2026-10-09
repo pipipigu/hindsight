@@ -35,23 +35,29 @@ vi.mock("./config", async (importOriginal) => {
 const listPagesOk = async () => ({ items: [{ id: "p1", name: "Component map" }] });
 
 describe("buildSessionStartContext", () => {
-  it("does not fetch an unused page roster alongside registry recall", async () => {
-    const client = {
-      listDocumentIds: vi.fn(async () => new Set<string>()),
-      listPages: vi.fn(async () => ({ items: [{ id: "p", name: "Page" }] })),
-    };
-    const out = await buildSessionStartContext({
-      cwd: "/repo",
-      bankId: "mapped",
-      harness: "dsh",
-      cfg: resolveConfig({ bankResolution: "registry", autoSeed: false, autoInject: "recall" }),
-      client,
-    });
-    expect(client.listPages).not.toHaveBeenCalled();
-    expect(client.listDocumentIds).not.toHaveBeenCalled();
-    expect(out.additionalContext).toBeUndefined();
-    expect(out.systemMessage).toContain("mapped");
-  });
+  it.each(["recall", "none"] as const)(
+    "does not fetch an unused registry roster in %s mode",
+    async (autoInject) => {
+      const client = {
+        listDocumentIds: vi.fn(async () => new Set<string>()),
+        listPages: vi.fn(async () => ({ items: [{ id: "p", name: "Page" }] })),
+      };
+      const out = await buildSessionStartContext({
+        cwd: "/repo",
+        bankId: "mapped",
+        harness: "dsh",
+        cfg: resolveConfig({ bankResolution: "registry", autoSeed: false, autoInject }),
+        client,
+      });
+      expect(client.listPages).not.toHaveBeenCalled();
+      expect(client.listDocumentIds).not.toHaveBeenCalled();
+      if (autoInject === "none") {
+        expect(out.additionalContext).toContain("后台自动检索已关闭");
+        expect(out.additionalContext).not.toContain("No knowledge pages yet");
+      } else expect(out.additionalContext).toBeUndefined();
+      expect(out.systemMessage).toContain("mapped");
+    }
+  );
   it("warns in the user-visible banner when the old Claude Code plugin is still active", async () => {
     const client = { listDocumentIds: async () => new Set(["git:a"]), listPages: listPagesOk };
     const detectLegacyPlugin = vi.fn().mockReturnValue("hindsight-memory@hindsight");

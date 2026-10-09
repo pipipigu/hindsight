@@ -1,4 +1,5 @@
 import { permissionMode } from "./tool-context";
+import { buildMemoryQueryGuide } from "./recall-guidance";
 import { buildPageTrigger } from "./missions";
 /**
  * Shared `SessionStart` lifecycle: deterministically auto-seeds a cold repo's bank from its git
@@ -309,7 +310,9 @@ export async function buildSessionStartContext(args: {
   // synthesize yet. A failed roster request is NOT evidence of that, so keep the two cases apart.
   let pages: PageRef[] = [];
   let pageListKnown = false;
-  const rosterNeeded = cfg.bankResolution !== "registry" || cfg.autoInject !== "recall";
+  const queryOnly = cfg.bankResolution === "registry" && cfg.autoInject === "none";
+  const rosterNeeded =
+    cfg.bankResolution !== "registry" || (!queryOnly && cfg.autoInject !== "recall");
   if (rosterNeeded)
     try {
       pages = parsePageList(await client.listPages());
@@ -320,12 +323,14 @@ export async function buildSessionStartContext(args: {
       }
       /* fail-open preamble; preserve first-prompt reflect eligibility on a transient outage */
     }
-  const additionalContext = rosterNeeded
-    ? buildKnowledgePreamble(pages, {
-        reflectOnNewGoals: cfg.autoInject !== "reflect",
-        extra: cfg.toolGuideExtra,
-      })
-    : undefined;
+  const additionalContext = queryOnly
+    ? buildMemoryQueryGuide(bankId, cfg.toolGuideExtra)
+    : rosterNeeded
+      ? buildKnowledgePreamble(pages, {
+          reflectOnNewGoals: cfg.autoInject !== "reflect",
+          extra: cfg.toolGuideExtra,
+        })
+      : undefined;
   const deferInitialReflect = cold === true || (pageListKnown && pages.length === 0);
 
   // The banner shows on EVERY session — Hindsight's presence is part of the product, not a

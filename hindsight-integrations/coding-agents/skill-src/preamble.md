@@ -11,11 +11,11 @@ explains what happens automatically, which tools you have, and how to configure 
 
 ## Registry mode (this fork's default)
 
-Projects use the independent directory registry, not Git-derived bank names. Unmapped projects are inactive. Automatic conversation capture and Git import are off. Save only new durable preferences, decisions, verified facts or reusable debugging conclusions with `hindsight_save_conclusion(content, evidence)`; never save routine progress or guesses, and do not save on a quota. Only `completed` confirms extraction. Plan or unknown host permissions are read-only. The five knowledge pages remain automatic. The behavior described below applies to explicit upstream compatibility mode.
+Projects use the independent directory registry, not Git-derived bank names. Unmapped projects are inactive. Automatic retrieval defaults to `autoInject: "none"`: the host injects rules without fetching evidence or a page roster; the agent queries explicitly. Automatic conversation capture and Git import are off. Save only new durable preferences, decisions, verified facts or reusable debugging conclusions with `hindsight_save_conclusion(content, evidence)`; never save routine progress or guesses, and do not save on a quota. Only `completed` confirms extraction. Plan or unknown host permissions are read-only. The five knowledge pages remain automatic. The behavior described below applies to explicit upstream compatibility mode.
 
-主动查询先于本地文件与代码检索：知识专题使用 `hindsight_search_knowledge_pages`；归纳结论及支撑事实使用 `hindsight_search_observations`；具体事实使用 `hindsight_recall`；云端综合整理使用现有 `hindsight_reflect`。新检索工具支持 Recall 的类型、预算、token 上限、标签、时间排序、原文与追踪选项，保留服务端排序；主动查询不受自动注入的 2000 tokens 限制。`temporal_window` 影响排序，不是严格日期过滤。工具只读并绑定当前项目库。
+主动查询先于本地文件与代码检索：具体事实优先 `hindsight_recall`，归纳经验用 `hindsight_search_observations`，概览与专题用知识页搜索，综合整理可直接用 `hindsight_reflect`。按需选择，不必全部调用；证据足够就停，补查只针对缺口。提案、历史报告与二次摘要须注明范围和时间；声称现行须有实施证据，导入时间不代表实施时间；不同模块不能直接拼接规则。推导须标明，冲突或缺失保留待确认；只凭记忆时不查本地。工具绑定当前项目库，保留服务端排序；`temporal_window` 影响排序，不是严格日期过滤。
 
-两个检索工具默认返回精简 JSON：保留正文、时间、可辨识来源与引用，隐藏空项、评分及索引字段。`source_refs` 的 F 编号在 `sources` 中对应已返回依据的原始记忆 ID，`chunk_ref` 的 C 编号对应 `chunks` 中的原文片段，均仅在本次结果中有效。未返回正文的来源只显示 `missing_source_count`；截断标志会保留。指定 `output_format: "raw"` 可返回完整 API 数据及所有来源 ID；请求 `trace: true` 且未指定格式时也使用 raw。格式选择不影响服务端检索。
+两个检索工具默认精简 JSON：保留正文、来源、时间与证据状态，隐藏空项、评分、内部元数据和实体列表，并附证据使用规则；`include.entities` 对象可按需取实体详情。F/C 引用分别对应 `sources` 中的事实与 `chunks` 中的原文，仅在本次结果有效；未返回的依据显示 `missing_source_count`，截断标志保留。`output_format: "raw"` 保留完整 API 响应；`trace: true` 未指定格式时也使用 raw。格式选择不影响排序。
 
 ## Upstream-mode automatic behavior
 
@@ -46,8 +46,11 @@ When the user says "store this in hindsight" / "remember this":
 
 ## Retrieving
 
-- `hindsight_search_knowledge_pages(query)` — FIRST STOP for project questions (components,
-  conventions, past decisions, initiatives). Server-side hybrid search, fast.
+- `hindsight_recall(query)` — concrete facts and experiences; preferred for factual questions.
+- `hindsight_search_observations(query)` — consolidated experience with supporting facts.
+- `hindsight_search_knowledge_pages(query)` — project overviews and topics (components,
+  conventions, past decisions, initiatives). Server-side hybrid search, fast; not a prerequisite
+  for recall or reflect. Read a full page only when the snippet leaves a relevant evidence gap.
 - `hindsight_read_knowledge_page(page_id)` / `hindsight_list_knowledge_pages` — read pages fully.
 - `hindsight_reflect(query)` — deep reasoning over the whole memory for WHY questions and exact
   decided values; slower (seconds), use deliberately.

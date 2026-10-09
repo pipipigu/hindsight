@@ -9,10 +9,33 @@ const fields = [
   "mentioned_at",
   "occurred_start",
   "occurred_end",
-  "entities",
   "attachments",
 ];
-const metadataNoise = new Set(["source_sha256", "sanitized_sha256", "redaction_count", "wiki_id"]);
+// Keep provenance and evidence state, including false/zero values. The previous denylist kept
+// growing as importer internals (agent ids, layer ids, hashes) reached the model in every result.
+const metadataEvidence = new Set([
+  "source",
+  "source_kind",
+  "source_path",
+  "source_key",
+  "source_url",
+  "url",
+  "title",
+  "document_title",
+  "document_status",
+  "status",
+  "tier",
+  "verification",
+  "evidence",
+  "scope",
+  "limitations",
+  "verified",
+  "verified_at",
+  "version",
+  "source_version",
+  "valid_from",
+  "valid_until",
+]);
 
 /** Remove empty properties, never false/zero or array positions. */
 function nonempty(value: unknown): unknown {
@@ -29,7 +52,11 @@ function nonempty(value: unknown): unknown {
 }
 
 /** Display projection only: all result rows and their text remain in server order. */
-export function formatRecallResponse(payload: Row, format: "compact" | "raw"): Row {
+export function formatRecallResponse(
+  payload: Row,
+  format: "compact" | "raw",
+  options: { includeEntities?: boolean } = {}
+): Row {
   const results = payload.results as unknown[];
   if (format === "raw")
     return Object.fromEntries([
@@ -67,6 +94,10 @@ export function formatRecallResponse(payload: Row, format: "compact" | "raw"): R
       const v = nonempty(row[key]);
       if (v !== undefined) out[key] = v;
     }
+    if (options.includeEntities) {
+      const entities = nonempty(row.entities);
+      if (entities !== undefined) out.entities = entities;
+    }
     if (Array.isArray(row.tags)) {
       const tags = row.tags.filter(
         (tag) =>
@@ -77,7 +108,7 @@ export function formatRecallResponse(payload: Row, format: "compact" | "raw"): R
     const metadata = rowOf(row.metadata);
     if (metadata) {
       const cleaned = Object.fromEntries(
-        Object.entries(metadata).filter(([key]) => !metadataNoise.has(key))
+        Object.entries(metadata).filter(([key]) => metadataEvidence.has(key))
       );
       if (cleaned.source_key === cleaned.source_path) delete cleaned.source_key;
       const meaningful = nonempty(cleaned);
@@ -107,8 +138,10 @@ export function formatRecallResponse(payload: Row, format: "compact" | "raw"): R
     out.chunks = Object.fromEntries(
       [...chunkRefs].map(([id, ref]) => [ref, nonempty(chunks[id]) ?? chunks[id]])
     );
-  const entities = nonempty(payload.entities);
-  if (entities !== undefined) out.entities = entities;
+  if (options.includeEntities) {
+    const entities = nonempty(payload.entities);
+    if (entities !== undefined) out.entities = entities;
+  }
   for (const flag of ["source_facts_truncated", "chunks_truncated", "results_truncated"])
     if (typeof payload[flag] === "boolean") out[flag] = payload[flag];
   return out;

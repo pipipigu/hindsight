@@ -244,7 +244,7 @@ describe("independent project registry", () => {
       cfg.manageBankConfig,
     ]).toEqual([false, false, false, false, false]);
     expect(cfg.gitIngest).toBe("none");
-    expect(cfg.autoInject).toBe("recall");
+    expect(cfg.autoInject).toBe("none");
     expect(cfg.injectTimeoutMs).toBe(7000);
     expect(cfg.pageTriggerType).toBe("cron");
   });
@@ -315,7 +315,7 @@ describe("bounded per-turn recall", () => {
     const first = await buildHookOutput({
       harness: "dsh",
       prompt: "Why does the cache eviction policy work this way?",
-      cfg: f.memory.cfg,
+      cfg: { ...f.memory.cfg, autoInject: "recall" },
       client: client as never,
       cacheFile,
     });
@@ -324,15 +324,19 @@ describe("bounded per-turn recall", () => {
     const ack = await buildHookOutput({
       harness: "dsh",
       prompt: "好的",
-      cfg: f.memory.cfg,
+      cfg: { ...f.memory.cfg, autoInject: "recall" },
       client: client as never,
       cacheFile,
     });
     expect(ack.context).toBeUndefined();
   });
   it("rebinds a persistent host after the mapping changes and drops old topic context", async () => {
-    const f = await api(),
-      core = new RuntimeCore(f.memory.client, "p-project", f.memory.cfg, "pi", project);
+    const f = await api();
+    writeFileSync(
+      config,
+      JSON.stringify({ ...JSON.parse(readFileSync(config, "utf8")), autoInject: "recall" })
+    );
+    const core = new RuntimeCore(f.memory.client, "p-project", f.memory.cfg, "pi", project);
     const session = "hot-" + temp.split("/").at(-1);
     try {
       await core.onPrompt(session, "Hindsight project mapping");
@@ -353,7 +357,7 @@ describe("bounded per-turn recall", () => {
   });
   it("runs on distinct turns but never repeats a supplied turn id", async () => {
     const fixture = await api(),
-      cfg = fixture.memory.cfg,
+      cfg = { ...fixture.memory.cfg, autoInject: "recall" as const },
       cacheFile = join(temp, "session.json");
     const args = {
       harness: "codex",

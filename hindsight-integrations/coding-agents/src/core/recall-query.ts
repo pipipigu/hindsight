@@ -30,7 +30,7 @@ export const recallQueryShape = {
     .enum(["compact", "raw"])
     .optional()
     .describe(
-      "compact (default): readable evidence without empty/debug fields; raw: full API JSON. trace=true defaults to raw unless overridden"
+      "compact (default): text, provenance, dates and evidence status; entity details only when requested. raw: full API JSON. trace=true defaults to raw unless overridden"
     ),
   query: z
     .string()
@@ -137,8 +137,12 @@ export function parseRecallQuery(args: unknown, observations: boolean): RecallQu
   return {
     budget: "mid",
     max_tokens: 4096,
-    ...(observations ? { include: { entities: null, source_facts: { max_tokens: 2048 } } } : {}),
     ...query,
+    include: {
+      entities: null,
+      ...(observations ? { source_facts: { max_tokens: 2048 } } : {}),
+      ...query.include,
+    },
     types: observations
       ? ["observation"]
       : parsed.types === undefined

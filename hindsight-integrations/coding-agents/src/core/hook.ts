@@ -1,5 +1,5 @@
 import { sharedRecall } from "./shared-recall";
-import { MEMORY_SEARCH_GUIDE } from "./recall-guidance";
+import { MEMORY_SEARCH_GUIDE, buildMemoryQueryGuide } from "./recall-guidance";
 /**
  * Shared runtime for HOOK-based harnesses (Claude Code, Codex, Cursor CLI, ...).
  *
@@ -219,6 +219,21 @@ export async function buildHookOutput(args: {
 
   const cached = readSessionCache(cacheFile);
   const turns = (cached.turns ?? 0) + 1;
+  if (cfg.bankResolution === "registry" && cfg.autoInject === "none") {
+    // Tool-only mode must also skip the page-roster fetch. Previously "none" still fetched pages
+    // and re-injected their guide; clear old automatic evidence when a session changes modes.
+    writeSessionCache(cacheFile, { turns });
+    const context = buildMemoryQueryGuide(client.bank, cfg.toolGuideExtra);
+    diag(harness, "query_only", {
+      bank: client.bank,
+      session: args.sessionId,
+      chars: context.length,
+    });
+    return {
+      context,
+      pages: [],
+    };
+  }
   if (cfg.bankResolution === "registry" && cfg.autoInject === "recall") {
     const sameBank =
       cached.recallBank === client.bank && cached.recallScope === client.scopeIdentity;

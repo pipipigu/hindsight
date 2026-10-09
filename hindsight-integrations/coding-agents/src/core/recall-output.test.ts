@@ -25,7 +25,14 @@ describe("compact Recall evidence", () => {
           source_sha256: "hash",
           tier: "reference",
           verified: false,
-          count: 0,
+          version: 0,
+          source_agent_id: "agent-internal",
+          generated_type: "entity_summary",
+          source_layer: "L2",
+          document_status: "proposal",
+          source: "explicit_save",
+          evidence: "Fixture deployment receipt",
+          limitations: { scope: "Single fixture; not a global guarantee" },
         },
         source_fact_ids: ["fact-a", "fact-b"],
       },
@@ -71,8 +78,13 @@ describe("compact Recall evidence", () => {
       source_path: "guide.md",
       tier: "reference",
       verified: false,
-      count: 0,
+      version: 0,
+      document_status: "proposal",
+      source: "explicit_save",
+      evidence: "Fixture deployment receipt",
+      limitations: { scope: "Single fixture; not a global guarantee" },
     });
+    expect(JSON.stringify(compact)).not.toMatch(/agent-internal|entity_summary|source_layer/);
   });
 
   it("uses one shared source table and keeps missing evidence explicit", () => {
@@ -102,20 +114,23 @@ describe("compact Recall evidence", () => {
     );
   });
 
-  it("retains canonical entity names and requested entity information", () => {
-    const v = formatRecallResponse(
-      {
-        results: [{ id: "x", text: "Robert renewed the lease", entities: ["Robert Smith"] }],
-        entities: {
-          "Robert Smith": { observations: [{ text: "Maintains the worker", context: null }] },
-        },
+  it("hides entity information by default and returns it on explicit request or in raw mode", () => {
+    const payload = {
+      results: [{ id: "x", text: "Robert renewed the lease", entities: ["Robert Smith"] }],
+      entities: {
+        "Robert Smith": { observations: [{ text: "Maintains the worker", context: null }] },
       },
-      "compact"
-    );
+    };
+    expect(formatRecallResponse(payload, "compact")).toEqual({
+      result_count: 1,
+      results: [{ id: "x", text: "Robert renewed the lease" }],
+    });
+    const v = formatRecallResponse(payload, "compact", { includeEntities: true });
     expect(v).toMatchObject({
       results: [{ entities: ["Robert Smith"] }],
       entities: { "Robert Smith": { observations: [{ text: "Maintains the worker" }] } },
     });
+    expect(formatRecallResponse(payload, "raw")).toEqual({ result_count: 1, ...payload });
   });
 
   it("returns full raw API data on demand, including empty/debug fields", () => {
@@ -137,6 +152,7 @@ describe("compact Recall evidence", () => {
         budget: "mid",
         max_tokens: 4096,
         trace: true,
+        include: { entities: null },
       });
       expect(recallOutputFormat(input)).toBe(output_format);
     }

@@ -128,11 +128,11 @@ export interface RawConfig {
    *  timeout. The automatic session-start reflect is NOT affected — it always uses "low" to fit
    *  its hook window. */
   reflectBudget?: "low" | "mid" | "high";
-  /** What to inject on the session's first prompt (default "reflect"):
+  /** Automatic retrieval mode (default "none" in registry mode, "reflect" upstream):
    *    "reflect" — one low-budget reflect synthesis (falls back to pages, then recall, on timeout/5xx)
    *    "pages"   — the knowledge pages matching the prompt by search (retrieval only, no LLM)
    *    "recall"  — the bank's memories recalled for the prompt (`recallOptions`; no LLM)
-   *    "none"    — nothing; the tool guide routes new goals through pages before optional reflection */
+   *    "none"    — guidance only in registry mode; choose the appropriate explicit query tool */
   autoInject?: AutoInject;
   /** @deprecated Use `autoInject`. Still honoured: false = `autoInject: "none"`, true = "reflect";
    *  ignored when `autoInject` is set. Setting it logs a deprecation warning. */
@@ -659,7 +659,7 @@ export function resolveConfig(raw: RawConfig = {}): Config {
       Math.max(raw.reflectTimeoutMs || 0, DEFAULT_REFLECT_TOOL_TIMEOUT_MS),
     injectTimeoutMs: raw.injectTimeoutMs || DEFAULT_INJECT_TIMEOUT_MS,
     reflectBudget: resolveReflectBudget(raw),
-    autoInject: shared && raw.autoInject === undefined ? "recall" : resolveAutoInject(raw),
+    autoInject: shared && raw.autoInject === undefined ? "none" : resolveAutoInject(raw),
     pageSearchLimit: raw.pageSearchLimit || DEFAULT_PAGE_SEARCH_LIMIT,
     // Same shape as retainMetadata: an object, or nothing. An array would spread into numeric
     // keys and reach the API as garbage, so it is rejected like any other non-object.

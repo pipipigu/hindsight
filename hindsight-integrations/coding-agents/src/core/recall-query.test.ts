@@ -4,6 +4,7 @@ import { buildKnowledgeTools } from "./knowledge-tools";
 import { parseRecallQuery, recallQueryShape, sanitizeRecallResponse } from "./recall-query";
 import { toDshParameters, runDshTool } from "../dsh";
 import { toPiTool } from "../harness/pi-extension";
+import { MEMORY_RESULT_GUIDE } from "./recall-guidance";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -121,7 +122,42 @@ describe("explicit memory queries", () => {
       types: ["world", "experience"],
       budget: "mid",
       max_tokens: 4096,
+      include: { entities: null },
     });
+  });
+
+  it("returns entity detail only on request while preserving observation source defaults", async () => {
+    const payload = {
+      results: [{ id: "m", text: "Lease renewal", entities: ["Robert"] }],
+      entities: { Robert: { observations: [{ text: "Maintains the worker" }] } },
+    };
+    const fetch = vi.fn(async (_url: unknown, _init?: RequestInit) => response(payload));
+    vi.stubGlobal("fetch", fetch);
+    const tool = buildKnowledgeTools(
+      new HindsightClient({ apiUrl: "http://fixture", bank: "project" }),
+      "project"
+    ).find((t) => t.name === "hindsight_recall")!;
+    const compact = JSON.parse((await tool.handler({ query: "lease" })).content[0].text);
+    expect(compact).toEqual({
+      evidence_guidance: MEMORY_RESULT_GUIDE,
+      result_count: 1,
+      results: [{ id: "m", text: "Lease renewal" }],
+    });
+    const explicit = JSON.parse(
+      (await tool.handler({ query: "lease", include: { entities: { max_tokens: 300 } } }))
+        .content[0].text
+    );
+    expect(explicit.entities).toEqual(payload.entities);
+    expect(explicit.results[0].entities).toEqual(["Robert"]);
+    expect(JSON.parse(String(fetch.mock.calls[1][1]?.body)).include.entities).toEqual({
+      max_tokens: 300,
+    });
+    expect(
+      parseRecallQuery({ query: "lease", include: { chunks: { max_tokens: 1000 } } }, true).include
+    ).toEqual({ entities: null, source_facts: { max_tokens: 2048 }, chunks: { max_tokens: 1000 } });
+    expect(
+      parseRecallQuery({ query: "lease", include: { source_facts: null } }, true).include
+    ).toEqual({ entities: null, source_facts: null });
   });
 
   it("passes web filters and includes verbatim and preserves server rank, source data and trace", async () => {
@@ -218,6 +254,7 @@ describe("explicit memory queries", () => {
       "project"
     ).find((t) => t.name === "hindsight_recall")!;
     expect(JSON.parse((await tool.handler({ query: "source evidence" })).content[0].text)).toEqual({
+      evidence_guidance: MEMORY_RESULT_GUIDE,
       result_count: 1,
       ...value,
     });
@@ -231,6 +268,7 @@ describe("explicit memory queries", () => {
       vi.fn(async () => response({ results: [] }))
     );
     expect(JSON.parse((await tool.handler({ query: "missing" })).content[0].text)).toEqual({
+      evidence_guidance: MEMORY_RESULT_GUIDE,
       result_count: 0,
       results: [],
     });
