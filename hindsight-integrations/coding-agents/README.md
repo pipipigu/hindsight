@@ -75,7 +75,7 @@ npx @vectorize-io/hindsight-coding-agents install claude-code
 npx @vectorize-io/hindsight-coding-agents install codex
 ```
 
-3 hooks in `~/.codex/hooks.json` plus `[mcp_servers]` in `config.toml` (needs `codex_hooks = true`).
+Lifecycle/context hooks in `~/.codex/hooks.json` plus `[mcp_servers.hindsight]` in `config.toml`. Enable `[features] hooks = true` where needed, and review the exact Hindsight hook definitions in `/hooks`. Registry mode disables conversation capture with `retainSessions: false`.
 
 #### <img src="https://hindsight.vectorize.io/img/harness/dcode.svg" alt="" width="20" height="20" /> DeepAgents Dcode
 

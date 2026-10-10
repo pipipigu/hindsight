@@ -171,6 +171,9 @@ it("runs the built Codex/Claude context hook and real MCP stdio from an unrelate
         }
       );
       expect(queryHook.status).toBe(0);
+      expect(JSON.parse(queryHook.stdout).hookSpecificOutput.permissionDecision).toBe(
+        harness === "codex" ? "allow" : undefined
+      );
       const queryResult = await client.callTool({
         name: toolName,
         arguments: JSON.parse(queryHook.stdout).hookSpecificOutput.updatedInput,

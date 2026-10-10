@@ -33,7 +33,12 @@ try {
       );
       process.stdout.write(
         JSON.stringify({
-          hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput: { ...input, _context } },
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            // Codex rejects an argument rewrite unless its hook explicitly allows the call.
+            ...(harness === "codex" ? { permissionDecision: "allow" } : {}),
+            updatedInput: { ...input, _context },
+          },
         })
       );
     }
