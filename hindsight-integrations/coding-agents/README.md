@@ -6,7 +6,7 @@ One package, several agents: a shared reflect-and-inject core with a thin entry 
 automatic — there is no setup command: a repo's git history and conversations flow into its memory
 bank in the background as you work.
 
-本 fork 要求 Node 24+，基于官方 0.8.0，默认使用独立目录映射。四端共用项目库，默认 `autoInject: "none"`，只注入查询与证据规则，由 Agent 主动选择工具；证据足够即停止，历史方案不等于现行实现。显式开启 `"recall"` 时仍有 7 秒、2,000 tokens 自动检索预算。对话采集、Git 导入、代码调查和自动升级默认关闭。长期结论使用 `hindsight_save_conclusion(content,evidence)`，策略缺失不回退；回执完成才算提取成功。知识页保留官方五类与按小时过期刷新，既有页面和库配置不覆盖。独立心智模型工具暂不提供。
+本 fork 要求 Node 24+，基于官方 0.8.0，默认使用独立目录映射。四端共用项目库，默认 `autoInject: "none"`，每轮只注入判断指令，由 Agent 结合当前上下文决定是否查询；当前对话足以处理、确认或衔接时跳过，需要新的历史证据时先查记忆再核验本地。Codex 首轮注入完整规则，后续使用短提醒，项目或规则变化时刷新；证据足够即停止，历史方案不等于现行实现。显式开启 `"recall"` 时仍有 7 秒、2,000 tokens 自动检索预算。对话采集、Git 导入、代码调查和自动升级默认关闭。长期结论使用 `hindsight_save_conclusion(content,evidence)`，策略缺失不回退；回执完成才算提取成功。知识页保留官方五类与按小时过期刷新，既有页面和库配置不覆盖。独立心智模型工具暂不提供。
 
 主动检索默认少量完整事实，整包预算和按需详情读取见 [技能说明](skill/SKILL.md#registry-mode-this-forks-default)。
 

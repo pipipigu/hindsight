@@ -1,5 +1,9 @@
 import { sharedRecall } from "./shared-recall";
-import { MEMORY_SEARCH_GUIDE, buildMemoryQueryGuide } from "./recall-guidance";
+import {
+  MEMORY_SEARCH_GUIDE,
+  buildMemoryQueryGuide,
+  buildMemoryTurnGuide,
+} from "./recall-guidance";
 /**
  * Shared runtime for HOOK-based harnesses (Claude Code, Codex, Cursor CLI, ...).
  *
@@ -23,6 +27,7 @@ import { MEMORY_SEARCH_GUIDE, buildMemoryQueryGuide } from "./recall-guidance";
  * without stdin/stdout; `runHook` is thin plumbing around it, with a `makeClient` seam for tests.
  */
 import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { deriveBankIdOrSkip } from "./bank";
 import type { Config } from "./config";
 import { applyBankConfig, loadConfig } from "./config";
@@ -222,8 +227,16 @@ export async function buildHookOutput(args: {
   if (cfg.bankResolution === "registry" && cfg.autoInject === "none") {
     // Tool-only mode must also skip the page-roster fetch. Previously "none" still fetched pages
     // and re-injected their guide; clear old automatic evidence when a session changes modes.
-    writeSessionCache(cacheFile, { turns });
-    const context = buildMemoryQueryGuide(client.bank, cfg.toolGuideExtra);
+    const guide = buildMemoryQueryGuide(client.bank, cfg.toolGuideExtra);
+    const queryGuideKey = createHash("sha256").update(guide).digest("hex");
+    const context =
+      harness === "codex" && cached.queryGuideKey === queryGuideKey
+        ? buildMemoryTurnGuide(client.bank)
+        : guide;
+    // Refresh the full policy when the project or guidance changes, including an existing session
+    // upgrading from the old mandatory-search rule. Codex retains hook context in conversation
+    // history. Other hosts can replace their system prompt each turn, so keep their full policy.
+    writeSessionCache(cacheFile, { turns, queryGuideKey });
     diag(harness, "query_only", {
       bank: client.bank,
       session: args.sessionId,

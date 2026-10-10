@@ -60,7 +60,8 @@ const TOOL_GUIDE =
   "shows what is true today but not what was decided or why; memory shows what was decided or said " +
   "back then but not whether it still holds. Work built from either alone goes wrong: from code alone " +
   "it quietly re-litigates settled questions, from memory alone it acts on stale claims. Search " +
-  "BEFORE you act whenever the turn is one of these — they are the ones that go wrong silently:\n" +
+  "BEFORE you act when the current conversation lacks the historical evidence needed for these tasks; " +
+  "do not repeat a search just because a task continues:\n" +
   "    • the user reports a bug or a wrong response (the intended behaviour, and the status code or " +
   "value it should return, may already have been decided);\n" +
   "    • you are about to write or change a test (what this project expects a change to ship with, and " +
@@ -97,7 +98,8 @@ const TOOL_GUIDE =
  * and let the question choose the query tool rather than requiring a page-search chain.
  */
 const QUERY_ON_GOALS =
-  "- The user just set a NEW task or goal → choose the appropriate memory query tool. Concrete " +
+  "- First decide whether the NEW task or goal needs historical evidence missing from the current " +
+  "conversation. If so, choose the appropriate memory query tool; otherwise proceed directly. Concrete " +
   "facts can go directly to hindsight_recall; a synthesis can go directly to hindsight_reflect. " +
   "Do not require a page search or full-page read before either.\n";
 

@@ -14,6 +14,8 @@ export interface SessionCache {
   recallTurns?: string[];
   recallTopic?: { text: string; at: number };
   turns?: number;
+  /** Identity of the last full tool-only policy injected; project/rule changes require a refresh. */
+  queryGuideKey?: string;
   reflectAnswer?: string; // present (even "") = reflect already resolved this session
   /** How many times auto-inject has been ATTEMPTED this session — every source, not just reflect.
    *  A failure leaves `reflectAnswer` unset so a later turn can retry; this bounds that retry (see
