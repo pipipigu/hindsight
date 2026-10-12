@@ -231,7 +231,7 @@ export async function buildHookOutput(args: {
     const queryGuideKey = createHash("sha256").update(guide).digest("hex");
     const context =
       harness === "codex" && cached.queryGuideKey === queryGuideKey
-        ? buildMemoryTurnGuide(client.bank)
+        ? buildMemoryTurnGuide(client.bank, cfg.toolGuideExtra)
         : guide;
     // Refresh the full policy when the project or guidance changes, including an existing session
     // upgrading from the old mandatory-search rule. Codex retains hook context in conversation

@@ -112,11 +112,15 @@ describe("buildHookOutput", () => {
     "reminds %s on every submission without classifying or fetching, and refreshes changed policy",
     async (harness) => {
       const client = { ...makeClient(), bank: "mapped" };
-      let cfg = resolveConfig({ bankResolution: "registry" });
+      let cfg = resolveConfig({
+        bankResolution: "registry",
+        toolGuideExtra: "Shared memory summary instruction",
+      });
       const submit = (prompt: string) =>
         buildHookOutput({ harness, prompt, cfg, client, cacheFile });
       const first = await submit("项目的历史接口约定是什么？");
       expect(first.context).toContain(MEMORY_EVIDENCE_GUIDE);
+      expect(first.context).toContain("Shared memory summary instruction");
       for (const prompt of [
         "继续吧",
         "开始",
@@ -129,6 +133,7 @@ describe("buildHookOutput", () => {
         expect(next.context).toContain(MEMORY_QUERY_DECISION_GUIDE);
         expect(next.context).toContain("mapped");
         expect(next.context).toContain("hindsight_recall");
+        expect(next.context).toContain("Shared memory summary instruction");
         if (harness === "codex") {
           expect(next.context).not.toContain(MEMORY_EVIDENCE_GUIDE);
           expect(next.context!.length).toBeLessThan(first.context!.length / 2);
@@ -143,6 +148,9 @@ describe("buildHookOutput", () => {
       const changed = await submit("继续");
       expect(changed.context).toContain("Changed team rule");
       expect(changed.context).toContain(MEMORY_EVIDENCE_GUIDE);
+      const subsequent = await submit("继续");
+      expect(subsequent.context).toContain("Changed team rule");
+      expect(subsequent.context).not.toContain("Shared memory summary instruction");
       for (const method of [
         "reflect",
         "listPages",

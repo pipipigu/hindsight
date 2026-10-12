@@ -31,10 +31,11 @@ export function buildMemoryQueryGuide(bank?: string, extra?: string): string {
 }
 
 /** The complete policy persists in the conversation; later prompts need only a decision reminder. */
-export function buildMemoryTurnGuide(bank?: string): string {
+export function buildMemoryTurnGuide(bank?: string, extra?: string): string {
   return (
     MEMORY_QUERY_DECISION_GUIDE +
     "\n需要时按问题选择 hindsight_recall（具体事实）、hindsight_search_observations（经验）、hindsight_search_knowledge_pages（专题）或 hindsight_reflect（综合整理）；需要记忆时先查询，再核验本地。已有证据足够就停；补查只针对新缺口。遵循会话已有的检索预算、证据与保存规则，计划模式只读。" +
-    `\n项目记忆库：${bank ?? "unknown"}。后台自动检索已关闭。`
+    `\n项目记忆库：${bank ?? "unknown"}。后台自动检索已关闭。` +
+    (extra?.trim() ? `\n${extra.trim()}` : "")
   );
 }
