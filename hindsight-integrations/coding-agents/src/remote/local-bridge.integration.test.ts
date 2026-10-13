@@ -271,6 +271,10 @@ describe("local adapters through real NAS HTTP transport", () => {
     const retains = calls.filter((c) => c.method === "POST" && c.url.endsWith("/memories"));
     expect(retains).toHaveLength(1);
     expect(retains[0].body.items[0].metadata.harness).toBe("codex");
+    const receipt = json(
+      await bridge.callRemoteTool("codex", directories[0].root, "plan", "hindsight_sync_status", {})
+    );
+    expect(receipt.queue).toContainEqual({ state: "completed", count: 1 });
   });
   it("cancels in-flight memory when registry changes without retrying to the new bank", async () => {
     const ready = new Promise<void>((r) => {

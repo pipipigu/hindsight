@@ -136,6 +136,46 @@ describe("NAS workspace bridge", () => {
     ]);
     expect(mock.call.mock.calls[0][2].signal).toBeInstanceOf(AbortSignal);
   });
+  it.each(["plan", "unknown"] as const)(
+    "%s status reads use submitting identity without permitting writes",
+    async (mode) => {
+      await callRemoteTool("codex", root, mode, "hindsight_sync_status", {});
+      await callRemoteTool("codex", root, mode, "hindsight_recall", { query: "x" });
+      expect(
+        mock.transport.mock.calls.map((call) => call[1].requestInit.headers.Authorization)
+      ).toEqual([`Bearer ${writeToken}`, `Bearer ${readToken}`]);
+      mock.connect.mockClear();
+      mock.transport.mockClear();
+      for (const name of ["hindsight_save_conclusion", "hindsight_ingest_document"])
+        await expect(
+          callRemoteTool("codex", root, mode, name, { content: "x", evidence: "y" })
+        ).rejects.toThrow("permission_denied");
+      expect(mock.connect).not.toHaveBeenCalled();
+    }
+  );
+  it("status reads use reader identity when no write credential exists", async () => {
+    writeFileSync(
+      secrets,
+      JSON.stringify({
+        endpoint: "https://nas.example/mcp",
+        projects: { codex: { alpha: { readToken } } },
+      })
+    );
+    await callRemoteTool("codex", root, "plan", "hindsight_sync_status", {});
+    expect(mock.transport.mock.calls[0][1].requestInit.headers.Authorization).toBe(
+      `Bearer ${readToken}`
+    );
+  });
+  it("does not retry status with reader token after writer authentication fails", async () => {
+    mock.connect.mockRejectedValue(new Error("unauthorized"));
+    await expect(
+      callRemoteTool("codex", root, "plan", "hindsight_sync_status", {})
+    ).rejects.toThrow("unauthorized");
+    expect(mock.connect).toHaveBeenCalledTimes(1);
+    expect(mock.transport.mock.calls[0][1].requestInit.headers.Authorization).toBe(
+      `Bearer ${writeToken}`
+    );
+  });
   it("rejects result when mapping changes during call", async () => {
     mock.call.mockImplementation(async () => {
       mappings("beta");

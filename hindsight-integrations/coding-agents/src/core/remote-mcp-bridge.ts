@@ -86,7 +86,7 @@ function privateConfig(cfg: Config) {
     throw new Error("remote_mcp_config_invalid");
   }
 }
-function binding(harness: string, cwd: string, write: boolean) {
+function binding(harness: string, cwd: string, write: boolean, receiptStatus = false) {
   const cfg = loadConfig({ harness });
   if (cfg.disabled || cfg.bankResolution !== "registry") throw new Error("remote_project_disabled");
   const project = resolveRegisteredProject(cwd, cfg.projectRegistryFile);
@@ -95,7 +95,13 @@ function binding(harness: string, cwd: string, write: boolean) {
     throw new Error("remote_project_binding_invalid");
   const remote = privateConfig(cfg);
   const credentials = remote.projects[harness]?.[project.bankId];
-  const token = write ? credentials?.writeToken : credentials?.readToken;
+  // Receipts belong to the submitting identity. This read-only operation may inspect the
+  // writer identity, without granting permission for any write operation.
+  const token = write
+    ? credentials?.writeToken
+    : receiptStatus
+      ? (credentials?.writeToken ?? credentials?.readToken)
+      : credentials?.readToken;
   if (!token) throw new Error("remote_project_credential_missing");
   return {
     bankId: project.bankId,
@@ -256,15 +262,16 @@ export async function callRemoteTool(
 ): Promise<CallToolResult> {
   if (Object.keys(args).some((key) => forbidden.has(key)))
     throw new Error("remote_tool_context_override");
-  const write = writeNames.has(name);
-  if (!write && !readNames.has(name)) throw new Error("remote_tool_unavailable");
-  if (write && mode !== "normal") throw new Error("remote_write_permission_denied");
-  const initial = binding(harness, cwd, write);
+  const writeOperation = writeNames.has(name);
+  if (!writeOperation && !readNames.has(name)) throw new Error("remote_tool_unavailable");
+  if (writeOperation && mode !== "normal") throw new Error("remote_write_permission_denied");
+  const receiptStatus = name === "hindsight_sync_status";
+  const initial = binding(harness, cwd, writeOperation, receiptStatus);
   return connected(
     initial,
     harness,
     () => {
-      if (binding(harness, cwd, write).identity !== initial.identity)
+      if (binding(harness, cwd, writeOperation, receiptStatus).identity !== initial.identity)
         throw new Error("remote_project_binding_changed");
     },
     (client, currentSignal) =>
