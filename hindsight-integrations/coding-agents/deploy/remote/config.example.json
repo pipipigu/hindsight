@@ -1,0 +1,20 @@
+{
+  "apiUrl": "http://hindsight-api:8888",
+  "apiToken": "REPLACE_WITH_BACKEND_CREDENTIAL",
+  "bindHost": "0.0.0.0",
+  "port": 8787,
+  "publicOrigin": "https://memory.example.com",
+  "toolGuideExtra": "Use historical evidence carefully; save only durable conclusions with evidence.",
+  "maxConcurrentTools": 8,
+  "maxConcurrentToolsPerClient": 2,
+  "clients": [
+    {
+      "id": "notion",
+      "tokenHash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "mode": "library",
+      "allowedBanks": "*",
+      "read": true,
+      "write": true
+    }
+  ]
+}

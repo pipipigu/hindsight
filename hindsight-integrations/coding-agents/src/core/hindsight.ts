@@ -46,7 +46,12 @@ export interface KnowledgeNode {
  * retain API). The scalar modes are the server's; a `string[][]` declares the scopes explicitly.
  */
 export type ObservationScopes =
-  "shared" | "combined" | "per_tag" | "all_combinations" | "per_source" | string[][];
+  | "shared"
+  | "combined"
+  | "per_tag"
+  | "all_combinations"
+  | "per_source"
+  | string[][];
 
 /**
  * `per_source` is resolved HERE, per document, and never reaches the server: it expands to the
@@ -95,7 +100,19 @@ export function resolveRetainScopes(
  */
 export const DEFAULT_OBSERVATION_SCOPES: ObservationScopes = "shared";
 
+/** Constructed only by the authenticated HTTP adapter; never accepted from tool arguments. */
+export interface RemoteBinding {
+  principalId: string;
+  policyRevision: string;
+  credentialId: string;
+  assertRead: () => void;
+  assertWrite: () => void;
+}
+
 export interface ClientOpts {
+  remoteBinding?: RemoteBinding;
+  /** Stable backend identity shared by local and remote aliases for conclusion deduplication. */
+  dedupScopeId?: string;
   registryBinding?: { directory: string; file?: string; networkConfigured?: boolean };
   apiUrl: string;
   apiToken?: string;
@@ -338,6 +355,8 @@ async function pageJson(response: Response, limit?: number): Promise<unknown> {
 }
 
 export class HindsightClient {
+  readonly remoteBinding?: RemoteBinding;
+  readonly dedupScopeId: string;
   readonly registryBinding?: ClientOpts["registryBinding"];
   private readonly boundCredential?: string;
   private lifecycleSignal?: AbortSignal;
@@ -365,9 +384,12 @@ export class HindsightClient {
   readonly recallOptions: Record<string, unknown>;
 
   constructor(o: ClientOpts) {
+    if (o.registryBinding && o.remoteBinding) throw new Error("ambiguous_memory_binding");
+    this.remoteBinding = o.remoteBinding ? Object.freeze({ ...o.remoteBinding }) : undefined;
+    this.dedupScopeId = o.dedupScopeId ?? o.apiUrl.replace(/\/$/, "");
     this.registryBinding = o.registryBinding;
     this.boundCredential = o.apiToken;
-    if (o.registryBinding) {
+    if (o.registryBinding || o.remoteBinding) {
       const endpoint = new URL(o.apiUrl);
       if (
         !["http:", "https:"].includes(endpoint.protocol) ||
@@ -413,6 +435,9 @@ export class HindsightClient {
           this.boundCredential,
           this.registryBinding?.directory,
           revision,
+          this.remoteBinding?.principalId,
+          this.remoteBinding?.policyRevision,
+          this.remoteBinding?.credentialId,
         ])
       )
       .digest("hex");
@@ -463,15 +488,39 @@ export class HindsightClient {
    */
   private async fetchWithAuth(url: string, init: RequestInit): Promise<Response> {
     const assertScope = () => {
+      if (this.remoteBinding) {
+        const bankUrl = this.bankUrl();
+        const chunkPrefix = `${this.apiUrl}/v1/default/chunks/`;
+        const originalRead =
+          (init.method ?? "GET").toUpperCase() === "GET" &&
+          url.startsWith(chunkPrefix) &&
+          url.slice(chunkPrefix.length).length > 0 &&
+          !url.slice(chunkPrefix.length).includes("/") &&
+          !url.includes("?");
+        if (
+          !originalRead &&
+          url !== `${this.apiUrl}/version` &&
+          url !== bankUrl &&
+          !url.startsWith(`${bankUrl}/`) &&
+          !url.startsWith(`${bankUrl}?`)
+        )
+          throw new Error("remote_scope_changed");
+        this.remoteBinding.assertRead();
+        const method = (init.method ?? "GET").toUpperCase();
+        const readPost =
+          method === "POST" &&
+          ["/memories/recall", "/reflect"].some((suffix) => url === this.bankUrl(suffix));
+        if (!["GET", "HEAD"].includes(method) && !readPost) this.remoteBinding.assertWrite();
+      }
       if (this.registryBinding?.networkConfigured === false)
         throw new Error("memory_endpoint_not_configured");
-      if (this.registryBinding && this.token !== this.boundCredential)
+      if ((this.registryBinding || this.remoteBinding) && this.token !== this.boundCredential)
         throw new Error("credential_scope_changed");
       if (this.registryBinding)
         assertProjectBinding(this.registryBinding.directory, this.bank, this.registryBinding.file);
     };
     assertScope();
-    if (this.registryBinding && url !== this.bankUrl("/stats")) {
+    if ((this.registryBinding || this.remoteBinding) && url !== this.bankUrl("/stats")) {
       const health = await this.fetchWithAuth(this.bankUrl("/stats"), {
         method: "GET",
         signal: init.signal,
@@ -493,10 +542,15 @@ export class HindsightClient {
           : init.signal,
       });
     };
-    const r = await send();
+    let r = await send();
     assertScope();
-    if (r.status !== 401 || !this.refreshToken()) return r;
-    return send();
+    if (r.status === 401 && this.refreshToken()) r = await send();
+    if (this.remoteBinding && r.ok && url.startsWith(`${this.apiUrl}/v1/default/chunks/`)) {
+      const chunk = (await pageJson(r.clone(), 4 * 1024 * 1024)) as { bank_id?: unknown };
+      if (chunk.bank_id !== this.bank) throw new Error("project_bank_mismatch");
+      assertScope();
+    }
+    return r;
   }
 
   /** A 401 with no `Authorization` header is a different failure from a rejected key, and the
@@ -719,6 +773,7 @@ export class HindsightClient {
       defaults?: Record<string, unknown>;
     } = {}
   ): Promise<void> {
+    if (this.remoteBinding) throw new Error("remote_bank_management_denied");
     if (this.registryBinding) {
       await this.seedPages(opts.pageTrigger, opts.pages, opts.customPages);
       return;
@@ -893,7 +948,7 @@ export class HindsightClient {
       );
       if (response.status === 404) throw new Error("project_bank_missing");
       const value = await pageJson(response, 4 * 1024 * 1024);
-      if (this.registryBinding && this.scopeIdentity !== identity)
+      if ((this.registryBinding || this.remoteBinding) && this.scopeIdentity !== identity)
         throw new Error("project_scope_changed");
       if (
         !value ||
@@ -920,7 +975,7 @@ export class HindsightClient {
       const response = await this.req("GET", url, undefined, [], 45000, stop.signal);
       if (response.status === 404) throw new Error(missing);
       const value = await pageJson(response, 4 * 1024 * 1024);
-      if (this.registryBinding && this.scopeIdentity !== identity)
+      if ((this.registryBinding || this.remoteBinding) && this.scopeIdentity !== identity)
         throw new Error("project_scope_changed");
       if (!value || typeof value !== "object" || Array.isArray(value))
         throw new Error("invalid_memory_response");

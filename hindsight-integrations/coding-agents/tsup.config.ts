@@ -68,6 +68,7 @@ export default defineConfig({
     // Spawned DETACHED to hold the codebase-survey lease for the survey agent's lifetime.
     "survey-supervisor": "src/survey-supervisor.ts",
     "mcp-server": "src/mcp-server.ts",
+    "mcp-http-server": "src/mcp-http-server.ts",
     "hindsight-seed": "src/hindsight-seed.ts",
   },
   format: ["esm"],

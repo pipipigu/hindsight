@@ -27,6 +27,8 @@ interface Delivery {
   credential: string | null;
   lease: number;
   error: string | null;
+  remote_binding: string | null;
+  dedup_scope: string | null;
 }
 function openQueue(): DatabaseSync {
   const root =
@@ -43,7 +45,25 @@ function openQueue(): DatabaseSync {
     )
   )
     db.exec("ALTER TABLE conclusions ADD COLUMN credential TEXT");
+  for (const column of ["remote_binding", "dedup_scope"]) {
+    if (
+      !(db.prepare("PRAGMA table_info(conclusions)").all() as { name: string }[]).some(
+        (c) => c.name === column
+      )
+    )
+      db.exec(`ALTER TABLE conclusions ADD COLUMN ${column} TEXT`);
+  }
   return db;
+}
+function remoteIdentity(client: HindsightClient): string | null {
+  const binding = client.remoteBinding;
+  return binding
+    ? JSON.stringify({
+        principalId: binding.principalId,
+        policyRevision: binding.policyRevision,
+        credentialId: binding.credentialId,
+      })
+    : null;
 }
 function credentialId(client: HindsightClient): string {
   return createHash("sha256")
@@ -55,9 +75,15 @@ export function conclusionStatus(client: HindsightClient) {
   try {
     return db
       .prepare(
-        "SELECT state, count(*) AS count FROM conclusions WHERE endpoint=? AND bank=? AND credential=? GROUP BY state"
+        "SELECT state, count(*) AS count FROM conclusions WHERE endpoint=? AND bank=? AND credential=? AND ((remote_binding IS NULL AND ? IS NULL) OR remote_binding=?) GROUP BY state"
       )
-      .all(client.apiUrl, client.bank, credentialId(client));
+      .all(
+        client.apiUrl,
+        client.bank,
+        credentialId(client),
+        remoteIdentity(client),
+        remoteIdentity(client)
+      );
   } finally {
     db.close();
   }
@@ -69,13 +95,14 @@ export async function saveConclusion(client: HindsightClient, args: unknown, har
     content: sanitizeSharedText(parsed.content, [client.apiToken]),
     evidence: sanitizeSharedText(parsed.evidence, [client.apiToken]),
   });
-  if (!binding) throw new Error("trusted_workspace_required");
-  if (binding.networkConfigured === false) throw new Error("memory_endpoint_not_configured");
-  assertProjectBinding(binding.directory, client.bank, binding.file);
+  if (!binding && !client.remoteBinding) throw new Error("trusted_workspace_required");
+  client.remoteBinding?.assertWrite();
+  if (binding?.networkConfigured === false) throw new Error("memory_endpoint_not_configured");
+  if (binding) assertProjectBinding(binding.directory, client.bank, binding.file);
   const hash = createHash("sha256")
     .update(
       JSON.stringify([
-        client.apiUrl,
+        client.dedupScopeId,
         client.bank,
         credentialId(client),
         input.content,
@@ -88,18 +115,27 @@ export async function saveConclusion(client: HindsightClient, args: unknown, har
   try {
     const result = db
       .prepare(
-        "INSERT OR IGNORE INTO conclusions(id,endpoint,bank,cwd,registry,payload,state,credential) VALUES(?,?,?,?,?,?, 'pending',?)"
+        "INSERT OR IGNORE INTO conclusions(id,endpoint,bank,cwd,registry,payload,state,credential,remote_binding,dedup_scope) VALUES(?,?,?,?,?,?, 'pending',?,?,?)"
       )
       .run(
         id,
         client.apiUrl,
         client.bank,
-        binding.directory,
-        binding.file ?? null,
+        binding?.directory ?? "",
+        binding?.file ?? null,
         JSON.stringify({ ...input, harness, timestamp: new Date().toISOString() }),
-        credentialId(client)
+        credentialId(client),
+        remoteIdentity(client),
+        client.dedupScopeId
       );
-    await deliverConclusion(db, client, id);
+    const owner = db.prepare("SELECT * FROM conclusions WHERE id=?").get(id) as unknown as Delivery;
+    // Duplicate readers may observe a receipt but cannot deliver another principal's pending work.
+    if (
+      owner.remote_binding === remoteIdentity(client) &&
+      owner.credential === credentialId(client) &&
+      owner.endpoint === client.apiUrl
+    )
+      await deliverConclusion(db, client, id);
     const row = db.prepare("SELECT state,error FROM conclusions WHERE id=?").get(id) as {
       state: string;
       error: string | null;
@@ -120,9 +156,15 @@ async function deliverConclusion(db: DatabaseSync, client: HindsightClient, id: 
   const row = db.prepare("SELECT * FROM conclusions WHERE id=?").get(id) as unknown as Delivery;
   try {
     if (row.credential !== credentialId(client)) throw new Error("credential_scope_changed");
-    if (row.endpoint !== client.apiUrl || row.bank !== client.bank)
+    if (
+      row.endpoint !== client.apiUrl ||
+      row.bank !== client.bank ||
+      (row.dedup_scope !== null && row.dedup_scope !== client.dedupScopeId)
+    )
       throw new Error("delivery_scope_changed");
-    assertProjectBinding(row.cwd, row.bank, row.registry ?? undefined);
+    if (row.remote_binding !== remoteIdentity(client)) throw new Error("remote_scope_changed");
+    if (client.remoteBinding) client.remoteBinding.assertWrite();
+    else assertProjectBinding(row.cwd, row.bank, row.registry ?? undefined);
     if (row.state === "pending") {
       const versionResponse = await client.req("GET", `${client.apiUrl}/version`);
       if (!versionResponse.ok) throw new Error("version_unavailable");
@@ -190,6 +232,11 @@ async function deliverConclusion(db: DatabaseSync, client: HindsightClient, id: 
         "project_disabled",
         "project_unregistered",
         "project_bank_missing",
+        "remote_scope_changed",
+        "remote_access_denied",
+        "remote_write_denied",
+        "remote_policy_changed",
+        "remote_credential_changed",
       ].includes(e.message)
         ? e.message
         : "delivery_retryable";
@@ -205,9 +252,11 @@ export async function retryConclusions(client: HindsightClient): Promise<void> {
   try {
     const rows = db
       .prepare(
-        "SELECT id FROM conclusions WHERE endpoint=? AND bank=? AND state IN ('pending','submitted') LIMIT 10"
+        "SELECT id FROM conclusions WHERE endpoint=? AND bank=? AND ((remote_binding IS NULL AND ? IS NULL) OR remote_binding=?) AND state IN ('pending','submitted') LIMIT 10"
       )
-      .all(client.apiUrl, client.bank) as { id: string }[];
+      .all(client.apiUrl, client.bank, remoteIdentity(client), remoteIdentity(client)) as {
+      id: string;
+    }[];
     for (const row of rows) await deliverConclusion(db, client, row.id);
   } finally {
     db.close();
@@ -219,9 +268,34 @@ export function pendingConclusionWorkspaces(): { cwd: string; harness: string }[
   try {
     return db
       .prepare(
-        "SELECT DISTINCT cwd, COALESCE(json_extract(payload,'$.harness'),'unknown') AS harness FROM conclusions WHERE state IN ('pending','submitted') LIMIT 20"
+        "SELECT DISTINCT cwd, COALESCE(json_extract(payload,'$.harness'),'unknown') AS harness FROM conclusions WHERE remote_binding IS NULL AND state IN ('pending','submitted') LIMIT 20"
       )
       .all() as { cwd: string; harness: string }[];
+  } finally {
+    db.close();
+  }
+}
+
+/** Original authenticated owners only; the HTTP host reconstructs their binding for recovery. */
+export function pendingRemoteConclusions(): {
+  bank: string;
+  endpoint: string;
+  principalId: string;
+  policyRevision: string;
+  credentialId: string;
+}[] {
+  const db = openQueue();
+  try {
+    const rows = db
+      .prepare(
+        "SELECT DISTINCT bank,endpoint,remote_binding FROM conclusions WHERE remote_binding IS NOT NULL AND state IN ('pending','submitted') LIMIT 100"
+      )
+      .all() as { bank: string; endpoint: string; remote_binding: string }[];
+    return rows.map(({ bank, endpoint, remote_binding }) => ({
+      bank,
+      endpoint,
+      ...JSON.parse(remote_binding),
+    }));
   } finally {
     db.close();
   }

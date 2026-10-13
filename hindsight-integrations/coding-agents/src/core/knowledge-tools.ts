@@ -271,38 +271,43 @@ export function buildKnowledgeTools(
         ["hindsight_search_observations", true],
         ["hindsight_recall", false],
       ] as const
-    ).map(([name, observations]): ToolSpec => ({
-      name,
-      description:
-        (observations
-          ? "Search consolidated observations for summarized experience or rules in the current project, including their supporting facts by default. "
-          : "For concrete facts, prefer this tool: recall factual memories and experiences in the current project using the same API as the web Recall analyzer. ") +
-        "Default compact output returns up to 5 complete ranked facts within a 3000-token estimate for the WHOLE JSON, including sources (segmented cl100k_base, provider usage differs). omitted_count counts fetched facts not shown; requires_read is an address, not evidence. Use hindsight_read_memory for a specific fact/original, instead of increasing max_tokens or requesting many chunks. seen_ids omits text already visible in this conversation; references are recoverable via read_memory. Stop when evidence suffices; further queries must address a specific gap. Raw/trace output is unbounded and only for an explicitly requested detailed/debug inspection. F/C references resolve through sources/chunks; source_ids identifies missing supporting facts. max_tokens controls server text, not the whole output.",
-      inputSchema: observations ? observationsQueryShape : recallQueryShape,
-      annotations: READ_ONLY_ANNOTATIONS,
-      handler: async (args: unknown) => {
-        try {
-          const query = parseRecallQuery(args, observations);
-          const identity = client.scopeIdentity;
-          const result = sanitizeRecallResponse(
-            await client.queryMemories(query),
-            client.apiToken
-          ) as Record<string, unknown>;
-          const format = recallOutputFormat(args);
-          const output = ok(
-            format === "compact"
-              ? boundedRecallResponse(result, args as RecallView, query.include?.entities != null)
-              : formatRecallResponse(result, "raw"),
-            format === "compact"
-          );
-          if (client.registryBinding && client.scopeIdentity !== identity)
-            throw new Error("project_scope_changed");
-          return output;
-        } catch (e) {
-          return err(e);
-        }
-      },
-    })),
+    ).map(
+      ([name, observations]): ToolSpec => ({
+        name,
+        description:
+          (observations
+            ? "Search consolidated observations for summarized experience or rules in the current project, including their supporting facts by default. "
+            : "For concrete facts, prefer this tool: recall factual memories and experiences in the current project using the same API as the web Recall analyzer. ") +
+          "Default compact output returns up to 5 complete ranked facts within a 3000-token estimate for the WHOLE JSON, including sources (segmented cl100k_base, provider usage differs). omitted_count counts fetched facts not shown; requires_read is an address, not evidence. Use hindsight_read_memory for a specific fact/original, instead of increasing max_tokens or requesting many chunks. seen_ids omits text already visible in this conversation; references are recoverable via read_memory. Stop when evidence suffices; further queries must address a specific gap. Raw/trace output is unbounded and only for an explicitly requested detailed/debug inspection. F/C references resolve through sources/chunks; source_ids identifies missing supporting facts. max_tokens controls server text, not the whole output.",
+        inputSchema: observations ? observationsQueryShape : recallQueryShape,
+        annotations: READ_ONLY_ANNOTATIONS,
+        handler: async (args: unknown) => {
+          try {
+            const query = parseRecallQuery(args, observations);
+            const identity = client.scopeIdentity;
+            const result = sanitizeRecallResponse(
+              await client.queryMemories(query),
+              client.apiToken
+            ) as Record<string, unknown>;
+            const format = recallOutputFormat(args);
+            const output = ok(
+              format === "compact"
+                ? boundedRecallResponse(result, args as RecallView, query.include?.entities != null)
+                : formatRecallResponse(result, "raw"),
+              format === "compact"
+            );
+            if (
+              (client.registryBinding || client.remoteBinding) &&
+              client.scopeIdentity !== identity
+            )
+              throw new Error("project_scope_changed");
+            return output;
+          } catch (e) {
+            return err(e);
+          }
+        },
+      })
+    ),
     {
       name: "hindsight_read_memory",
       description:
@@ -320,7 +325,7 @@ export function buildKnowledgeTools(
             client.apiToken
           ) as Awaited<ReturnType<HindsightClient["readMemory"]>>;
           const output = ok(boundedMemoryRead(data.memory, data.original, view, identity), true);
-          if (client.registryBinding && client.scopeIdentity !== identity)
+          if ((client.registryBinding || client.remoteBinding) && client.scopeIdentity !== identity)
             throw new Error("project_scope_changed");
           return output;
         } catch (e) {
@@ -386,7 +391,7 @@ export function buildKnowledgeTools(
             ),
             true
           );
-          if (client.registryBinding && client.scopeIdentity !== identity)
+          if ((client.registryBinding || client.remoteBinding) && client.scopeIdentity !== identity)
             throw new Error("project_scope_changed");
           return output;
         } catch (e) {
@@ -428,7 +433,7 @@ export function buildKnowledgeTools(
             client.apiToken
           ) as Record<string, unknown>;
           const out = ok(boundedKnowledgeRead(page, view, identity), true);
-          if (client.registryBinding && client.scopeIdentity !== identity)
+          if ((client.registryBinding || client.remoteBinding) && client.scopeIdentity !== identity)
             throw new Error("project_scope_changed");
           return out;
         } catch (e) {
@@ -553,7 +558,7 @@ export function buildKnowledgeTools(
       }),
     },
   ];
-  if (!client.registryBinding) return tools;
+  if (!client.registryBinding && !client.remoteBinding) return tools;
   tools.push({
     name: "hindsight_save_conclusion",
     description: CONCLUSION_GUIDE,
@@ -582,7 +587,10 @@ export function buildKnowledgeTools(
       ),
     handler: async (args, context) => {
       try {
-        if (!tool.annotations.readOnlyHint) assertCanWrite(context?.permission ?? "unknown");
+        if (!tool.annotations.readOnlyHint) {
+          assertCanWrite(context?.permission ?? "unknown");
+          client.remoteBinding?.assertWrite();
+        } else client.remoteBinding?.assertRead();
         // Agent-supplied bank/directory overrides have no place in a project-bound tool.
         if ("bank_id" in args || "bankId" in args || "cwd" in args)
           throw new Error("project_override_denied");
@@ -595,7 +603,7 @@ export function buildKnowledgeTools(
       } catch (e) {
         const message =
           e instanceof Error &&
-          /^(plan_readonly|host_permission_unavailable|project_[a-z_]+|conclusion_[a-z_]+)$/.test(
+          /^(plan_readonly|host_permission_unavailable|project_[a-z_]+|remote_[a-z_]+|conclusion_[a-z_]+)$/.test(
             e.message
           )
             ? e.message
