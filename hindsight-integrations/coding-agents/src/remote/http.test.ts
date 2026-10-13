@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { startRemoteServer } from "../mcp-http-server";
-import { credentialHash, loadRemoteConfig, type RemoteConfig } from "./config";
+import { pendingRemoteConclusions } from "../core/conclusions";
+import { credentialHash, loadRemoteConfig, policyRevision, type RemoteConfig } from "./config";
 
 describe("remote HTTP MCP", () => {
   let root: string,
@@ -19,7 +20,7 @@ describe("remote HTTP MCP", () => {
     calls: { url: string; method: string; authorization: string | undefined; body: unknown }[];
   let slowStarted: () => void, slowClosed: () => void;
   let pagedDirectory: boolean;
-  let directoryTotal: number, delayedReceipt: boolean;
+  let directoryTotal: number, delayedReceipt: boolean, pendingReceipt: boolean;
   let heldResponses: ServerResponse[];
   const token = "library-user-credential-with-at-least-32-bytes";
   const projectToken = "project-user-credential-with-at-least-32-bytes";
@@ -35,6 +36,7 @@ describe("remote HTTP MCP", () => {
     pagedDirectory = false;
     directoryTotal = 2;
     delayedReceipt = false;
+    pendingReceipt = false;
     heldResponses = [];
     backend = createServer(async (req, res) => {
       const parts: Buffer[] = [];
@@ -67,6 +69,7 @@ describe("remote HTTP MCP", () => {
               { bank_id: "alpha", name: "Alpha", config: { secret: backendToken } },
               { bank_id: "beta", name: "Beta" },
               { bank_id: "hidden", name: "Hidden" },
+              { bank_id: "项目中文", name: "中文项目" },
             ],
           })
         );
@@ -178,7 +181,7 @@ describe("remote HTTP MCP", () => {
         }, 50);
         setTimeout(() => res.end(JSON.stringify({ status: "completed" })), 150);
       } else if (req.url?.includes("/operations/"))
-        res.end(JSON.stringify({ status: "completed" }));
+        res.end(JSON.stringify({ status: pendingReceipt ? "processing" : "completed" }));
       else {
         res.statusCode = 500;
         res.end(JSON.stringify({ error: backendToken }));
@@ -246,6 +249,186 @@ describe("remote HTTP MCP", () => {
     return client;
   }
   const text = (result: unknown) => JSON.stringify(result);
+  it("validates ASCII aliases and includes them in authorization revisions", () => {
+    const revision = policyRevision(config, config.clients[0]);
+    config.bankAliases = { "project-alpha": "alpha" };
+    persist();
+    expect(loadRemoteConfig(path).bankAliases).toEqual(config.bankAliases);
+    expect(policyRevision(config, config.clients[0])).not.toBe(revision);
+    const invalidAliases: Record<string, string>[] = [
+      { 中文: "alpha" },
+      { alpha: "alpha" },
+      { one: "two", two: "alpha" },
+      { one: "two", two: "one" },
+      { one: "alpha", two: "alpha" },
+    ];
+    for (const aliases of invalidAliases) {
+      config.bankAliases = aliases;
+      persist();
+      expect(() => loadRemoteConfig(path)).toThrow("invalid_remote_configuration");
+    }
+  });
+  it("exposes aliases while reads, original evidence, saves and dedup use canonical banks", async () => {
+    config.bankAliases = { "project-alpha": "alpha", "project-beta": "beta" };
+    persist();
+    const client = await connect(writeToken);
+    const directory = await client.callTool({ name: "hindsight_list_banks", arguments: {} });
+    const parsed = JSON.parse((directory.content as { text: string }[])[0].text);
+    expect(parsed.banks).toEqual([
+      { bank_id: "project-alpha", name: "Alpha" },
+      { bank_id: "project-beta", name: "Beta" },
+    ]);
+    const recalled = await client.callTool({
+      name: "hindsight_recall",
+      arguments: { bank_id: "project-alpha", query: "facts" },
+    });
+    expect(text(recalled)).toContain("fact for alpha");
+    expect(JSON.parse((recalled.content as { text: string }[])[0].text).bank_id).toBe(
+      "project-alpha"
+    );
+    const original = await client.callTool({
+      name: "hindsight_read_memory",
+      arguments: {
+        bank_id: "project-alpha",
+        memory_id: "ea277a76-e147-4943-92cf-d4b7bbbb7b8f",
+        section: "original",
+      },
+    });
+    expect(text(original)).toContain("ORIGINAL_EVIDENCE_FROM_ALPHA");
+    const args = { content: "alias durable conclusion", evidence: "verified alias test" };
+    const saved = await client.callTool({
+      name: "hindsight_save_conclusion",
+      arguments: { ...args, bank_id: "project-alpha" },
+    });
+    expect(text(saved)).toContain("completed");
+    await client.callTool({
+      name: "hindsight_save_conclusion",
+      arguments: { ...args, bank_id: "alpha" },
+    });
+    expect(
+      calls.filter((call) => call.method === "POST" && call.url.endsWith("/memories"))
+    ).toHaveLength(1);
+    expect(
+      calls
+        .filter((call) => call.method === "POST")
+        .every((call) => call.url.includes("/banks/alpha/"))
+    ).toBe(true);
+    const status = await client.callTool({
+      name: "hindsight_sync_status",
+      arguments: { bank_id: "project-alpha" },
+    });
+    expect(JSON.parse((status.content as { text: string }[])[0].text).bank).toBe("project-alpha");
+    const project = await connect(projectToken);
+    const result = await project.callTool({
+      name: "hindsight_recall",
+      arguments: { query: "facts" },
+    });
+    expect(JSON.parse((result.content as { text: string }[])[0].text).bank_id).toBe("project-beta");
+    expect(
+      (
+        await project.callTool({
+          name: "hindsight_recall",
+          arguments: { bank_id: "project-alpha", query: "facts" },
+        })
+      ).isError
+    ).toBe(true);
+    const readonly = await connect();
+    expect((await readonly.listTools()).tools.map((tool) => tool.name)).not.toContain(
+      "hindsight_save_conclusion"
+    );
+  });
+  it("returns English IDs and Chinese names for banks with Chinese canonical IDs", async () => {
+    config.bankAliases = { "project-chinese": "项目中文" };
+    config.clients[0].allowedBanks = ["项目中文"];
+    persist();
+    const client = await connect();
+    const directory = await client.callTool({ name: "hindsight_list_banks", arguments: {} });
+    expect(JSON.parse((directory.content as { text: string }[])[0].text).banks).toEqual([
+      { bank_id: "project-chinese", name: "中文项目" },
+    ]);
+    const result = await client.callTool({
+      name: "hindsight_recall",
+      arguments: { bank_id: "project-chinese", query: "facts" },
+    });
+    expect(JSON.parse((result.content as { text: string }[])[0].text).bank_id).toBe(
+      "project-chinese"
+    );
+    expect(text(result)).toContain("fact for 项目中文");
+    expect(
+      calls.some((call) =>
+        call.url.includes(`/banks/${encodeURIComponent("项目中文")}/memories/recall`)
+      )
+    ).toBe(true);
+  });
+  it("stores pending alias saves under the actual bank and original policy", async () => {
+    pendingReceipt = true;
+    config.bankAliases = { "project-alpha": "alpha" };
+    persist();
+    const client = await connect(writeToken);
+    const args = { content: "pending alias conclusion", evidence: "pending fixture" };
+    const result = await client.callTool({
+      name: "hindsight_save_conclusion",
+      arguments: { ...args, bank_id: "project-alpha" },
+    });
+    expect(result.isError).not.toBe(true);
+    const pending = pendingRemoteConclusions();
+    expect(pending).toHaveLength(1);
+    expect(pending[0].bank).toBe("alpha");
+    expect(pending[0].policyRevision).toBe(
+      policyRevision(loadRemoteConfig(path), config.clients[2])
+    );
+    await client.callTool({
+      name: "hindsight_save_conclusion",
+      arguments: { ...args, bank_id: "alpha" },
+    });
+    expect(
+      calls.filter((call) => call.method === "POST" && call.url.endsWith("/memories"))
+    ).toHaveLength(1);
+    const originalRevision = pending[0].policyRevision;
+    config.bankAliases = { "project-alpha": "beta" };
+    persist();
+    expect(pendingRemoteConclusions()[0]).toMatchObject({
+      bank: "alpha",
+      policyRevision: originalRevision,
+    });
+    expect(policyRevision(loadRemoteConfig(path), config.clients[2])).not.toBe(originalRevision);
+  });
+  it("rejects directory alias collisions on both listing and direct tool calls", async () => {
+    config.bankAliases = { alpha: "hidden" };
+    persist();
+    const client = await connect();
+    const directory = await client.callTool({ name: "hindsight_list_banks", arguments: {} });
+    expect(text(directory)).toContain("remote_bank_alias_collision");
+    for (const bank_id of ["alpha", "beta"]) {
+      expect(
+        (
+          await client.callTool({
+            name: "hindsight_recall",
+            arguments: { bank_id, query: "facts" },
+          })
+        ).isError
+      ).toBe(true);
+    }
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(0);
+  });
+  it("rejects an old canonical binding after aliases change", async () => {
+    config.bankAliases = { "project-alpha": "alpha" };
+    persist();
+    const initial = loadRemoteConfig(path);
+    const { createRemoteClient } = await import("./tools");
+    const bound = createRemoteClient(
+      path,
+      initial,
+      initial.clients[0],
+      "alpha",
+      new AbortController().signal
+    );
+    config.bankAliases = { "project-alpha": "beta" };
+    persist();
+    expect(() => bound.remoteBinding?.assertRead()).toThrow("remote_authorization_changed");
+    expect(() => bound.remoteBinding?.assertWrite()).toThrow("remote_authorization_changed");
+    expect(calls).toHaveLength(0);
+  });
   it("requires bearer credentials and limits Host, Origin and body size", async () => {
     expect((await fetch(`${origin}/mcp`, { method: "POST", body: "{}" })).status).toBe(401);
     expect(
@@ -534,6 +717,7 @@ describe("remote HTTP MCP", () => {
       secondCancel = new AbortController(),
       projectCancel = new AbortController();
     const first = fetch(`${origin}/mcp`, args(token, "held", firstCancel.signal));
+    await waitHeld(1);
     const second = fetch(`${origin}/mcp`, args(token, "held", secondCancel.signal));
     await waitHeld(2);
     const principalRejected = await fetch(`${origin}/mcp`, args(token));

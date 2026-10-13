@@ -77,11 +77,17 @@ export function createRemoteClient(
   return client;
 }
 
-export async function listRemoteBanks(
+function publicBankId(config: RemoteConfig, bankId: string): string {
+  return (
+    Object.entries(config.bankAliases ?? {}).find(([, target]) => target === bankId)?.[0] ?? bankId
+  );
+}
+
+async function bankDirectory(
   config: RemoteConfig,
   principal: RemotePrincipal,
   signal: AbortSignal
-): Promise<{ bank_id: string; name?: string }[]> {
+): Promise<{ bank_id: string; name?: string | null }[]> {
   if (!principal.read) throw new Error("remote_read_denied");
   const boundedSignal = AbortSignal.any([signal, AbortSignal.timeout(15000)]);
   const schema = z.object({
@@ -125,9 +131,27 @@ export async function listRemoteBanks(
     if (page.total === undefined || offset >= page.total) break;
     if (!page.banks.length || offset >= 1024) throw new Error("remote_incomplete_directory");
   }
-  return [...new Map(rows.map((row) => [row.bank_id, row])).values()]
+  const banks = [...new Map(rows.map((row) => [row.bank_id, row])).values()];
+  if (
+    Object.keys(config.bankAliases ?? {}).some((alias) =>
+      banks.some((row) => row.bank_id === alias)
+    )
+  )
+    throw new Error("remote_bank_alias_collision");
+  return banks;
+}
+
+export async function listRemoteBanks(
+  config: RemoteConfig,
+  principal: RemotePrincipal,
+  signal: AbortSignal
+): Promise<{ bank_id: string; name?: string }[]> {
+  return (await bankDirectory(config, principal, signal))
     .filter((row) => permitsBank(principal, row.bank_id))
-    .map((row) => ({ bank_id: row.bank_id, ...(row.name ? { name: row.name.slice(0, 200) } : {}) }))
+    .map((row) => ({
+      bank_id: publicBankId(config, row.bank_id),
+      ...(row.name ? { name: row.name.slice(0, 200) } : {}),
+    }))
     .sort((a, b) => a.bank_id.localeCompare(b.bank_id));
 }
 
@@ -211,6 +235,7 @@ export function buildRemoteServer(
         return error(
           e instanceof Error &&
             [
+              "remote_bank_alias_collision",
               "remote_directory_too_large",
               "remote_incomplete_directory",
               "remote_authorization_changed",
@@ -231,7 +256,9 @@ export function buildRemoteServer(
               .trim()
               .min(1)
               .max(256)
-              .describe("Explicit authorized existing destination bank"),
+              .describe(
+                "Public bank_id returned by hindsight_list_banks; server resolves and authorizes the actual bank"
+              ),
           }
         : {}),
     };
@@ -245,8 +272,22 @@ export function buildRemoteServer(
       async (args, context) => {
         try {
           const { bank_id, ...clean } = args;
-          const bankId = principal.mode === "project" ? principal.bankId! : String(bank_id);
+          const requested = principal.mode === "project" ? principal.bankId! : String(bank_id);
+          // Project bindings and authorization lists are always canonical backend IDs.
+          const bankId =
+            principal.mode === "project"
+              ? requested
+              : config.bankAliases && Object.hasOwn(config.bankAliases, requested)
+                ? config.bankAliases[requested]
+                : requested;
           const scopedSignal = AbortSignal.any([signal, context.signal]);
+          assertLiveGrant(path, config, principal, bankId, !tool.annotations.readOnlyHint);
+          if (Object.keys(config.bankAliases ?? {}).length) {
+            const directory = await bankDirectory(config, principal, scopedSignal);
+            if (!directory.some((row) => row.bank_id === bankId))
+              throw new Error("remote_bank_missing");
+          }
+          const visibleBankId = publicBankId(config, bankId);
           const client = createRemoteClient(path, config, principal, bankId, scopedSignal);
           const scoped = buildKnowledgeTools(client, bankId, options).find(
             (candidate) => candidate.name === tool.name
@@ -271,8 +312,12 @@ export function buildRemoteServer(
                 ...block,
                 text: JSON.stringify(
                   value && typeof value === "object" && !Array.isArray(value)
-                    ? { ...value, bank_id: bankId }
-                    : { bank_id: bankId, result: value }
+                    ? {
+                        ...value,
+                        ...(tool.name === "hindsight_sync_status" ? { bank: visibleBankId } : {}),
+                        bank_id: visibleBankId,
+                      }
+                    : { bank_id: visibleBankId, result: value }
                 ),
               };
             }),

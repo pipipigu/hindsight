@@ -32,6 +32,7 @@ const schema = z
     apiToken: z.string().optional(),
     dedupScopeId: z.string().min(1).optional(),
     toolGuideExtra: z.string().max(16000).optional(),
+    bankAliases: z.record(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,255}$/), bank).optional(),
     bindHost: z.string().default("127.0.0.1"),
     port: z.number().int().min(0).max(65535).default(8787),
     maxConcurrentTools: z.number().int().min(1).max(32).default(8),
@@ -41,6 +42,13 @@ const schema = z
   })
   .strict()
   .superRefine((config, ctx) => {
+    const aliases = config.bankAliases ?? {};
+    const targets = Object.values(aliases);
+    if (
+      targets.some((target) => Object.hasOwn(aliases, target)) ||
+      new Set(targets).size !== targets.length
+    )
+      ctx.addIssue({ code: "custom", message: "invalid_bank_aliases" });
     const origin = new URL(config.publicOrigin);
     if (
       !["http:", "https:"].includes(origin.protocol) ||
@@ -95,6 +103,7 @@ export function policyRevision(config: RemoteConfig, client: RemotePrincipal): s
       apiUrl: config.apiUrl.replace(/\/$/, ""),
       backendCredentialHash: credentialHash(config.apiToken ?? "anonymous"),
       dedupScopeId: config.dedupScopeId,
+      bankAliases: Object.entries(config.bankAliases ?? {}).sort(([a], [b]) => a.localeCompare(b)),
       ...client,
     })
   );

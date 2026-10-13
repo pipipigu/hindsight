@@ -34,6 +34,8 @@ in front of the agent at the moment it starts working, and keeps a curated set o
 
 构建后设置 `HINDSIGHT_REMOTE_CONFIG` 运行 `node dist/mcp-http-server.js`。配置示例及容器入口见 [deploy/remote](deploy/remote)。API 后端凭据仅留服务端；每个 Agent 使用独立随机 Bearer Token，配置只存其 SHA256 到 `clients[].tokenHash`。`read/write` 与库范围独立；授权配置下次调用重读，监听地址修改需重启。默认工具并发全局8、每身份2，超过返回429；不接受批量请求。
 
+`bankAliases` 将英文公开 ID 映射到已有库 ID，例如 `{"project-cn":"中文项目库"}`。列表展示公开 ID 和后端的中文名称，所有工具再解析到原库；授权、来源核验与保存去重使用真实 ID，不复制或新建库。保留原 ID 调用兼容性；名称用后端 PATCH `name` 更新。映射变更使旧绑定失效，待发结论不会改投；别名碰撞、链式映射及重复目标会被拒绝。
+
 ```bash
 npm run build
 mkdir -p deploy/remote/config deploy/remote/data

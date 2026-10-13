@@ -7,6 +7,9 @@
   "toolGuideExtra": "Use historical evidence carefully; save only durable conclusions with evidence.",
   "maxConcurrentTools": 8,
   "maxConcurrentToolsPerClient": 2,
+  "bankAliases": {
+    "project-cn": "中文项目库"
+  },
   "clients": [
     {
       "id": "notion",
