@@ -238,17 +238,125 @@ describe("remote HTTP MCP", () => {
     rmSync(root, { recursive: true, force: true });
     delete process.env.HINDSIGHT_SHARED_STATE_DIR;
   });
-  async function connect(credential = token) {
+  async function connect(credential = token, extraHeaders: Record<string, string> = {}) {
     const client = new Client({ name: "integration-test", version: "1" });
     clients.push(client);
     await client.connect(
       new StreamableHTTPClientTransport(new URL(`${origin}/mcp`), {
-        requestInit: { headers: { Authorization: `Bearer ${credential}` } },
+        requestInit: { headers: { Authorization: `Bearer ${credential}`, ...extraHeaders } },
       })
     );
     return client;
   }
   const text = (result: unknown) => JSON.stringify(result);
+  it("requires canonical project and harness headers and rejects library credentials", async () => {
+    config.clients[1].harness = "codex";
+    config.clients[1].requireProjectBinding = true;
+    persist();
+    const headers = {
+      "X-Hindsight-Project-Bank": Buffer.from("beta").toString("base64url"),
+      "X-Hindsight-Harness": "codex",
+    };
+    for (const [credential, binding] of [
+      [projectToken, {}],
+      [
+        projectToken,
+        { ...headers, "X-Hindsight-Project-Bank": Buffer.from("alpha").toString("base64url") },
+      ],
+      [projectToken, { ...headers, "X-Hindsight-Harness": "dsh" }],
+      [token, headers],
+    ] as const) {
+      const response = await fetch(`${origin}/mcp`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${credential}`,
+          ...binding,
+          "Content-Type": "application/json",
+        },
+        body: "{}",
+      });
+      expect(response.status).toBe(403);
+    }
+    expect(calls).toHaveLength(0);
+    const client = await connect(projectToken, headers);
+    const result = await client.callTool({
+      name: "hindsight_recall",
+      arguments: { query: "facts" },
+    });
+    expect(text(result)).toContain("fact for beta");
+    const count = calls.length;
+    config.clients[1].bankId = "alpha";
+    persist();
+    await expect(
+      client.callTool({ name: "hindsight_recall", arguments: { query: "facts" } })
+    ).rejects.toThrow();
+    expect(calls).toHaveLength(count);
+  });
+  it("offers explicit document import only to writable project identities", async () => {
+    const localToken = "local-project-write-credential-with-more-than-32-bytes";
+    config.clients.push({
+      id: "local-writer",
+      tokenHash: credentialHash(localToken),
+      mode: "project",
+      bankId: "alpha",
+      harness: "codex",
+      requireProjectBinding: true,
+      read: true,
+      write: true,
+    });
+    persist();
+    const client = await connect(localToken, {
+      "X-Hindsight-Project-Bank": Buffer.from("alpha").toString("base64url"),
+      "X-Hindsight-Harness": "codex",
+    });
+    expect(
+      (await client.listTools()).tools.some((tool) => tool.name === "hindsight_ingest_document")
+    ).toBe(true);
+    const library = await connect(writeToken);
+    expect(
+      (await library.listTools()).tools.some((tool) => tool.name === "hindsight_ingest_document")
+    ).toBe(false);
+    const result = await client.callTool({
+      name: "hindsight_ingest_document",
+      arguments: { title: "Verified document", content: "Explicit verified source document" },
+    });
+    expect(result.isError).not.toBe(true);
+    const retain = calls.find((call) => call.method === "POST" && call.url.endsWith("/memories"));
+    expect(retain).toBeDefined();
+    expect(JSON.stringify(retain?.body)).toContain("harness:codex");
+  });
+  it("keeps local catalog discovery generic and refuses all tool execution on that connection", async () => {
+    config.clients[1].harness = "codex";
+    config.clients[1].requireProjectBinding = true;
+    persist();
+    const headers = {
+      "X-Hindsight-Project-Bank": Buffer.from("beta").toString("base64url"),
+      "X-Hindsight-Harness": "codex",
+      "X-Hindsight-Catalog": "1",
+    };
+    const client = await connect(projectToken, headers);
+    expect(client.getInstructions()).toContain("实际项目由可信宿主按每次会话工作区绑定");
+    expect(client.getInstructions()).not.toContain("固定绑定项目记忆库 beta");
+    expect((await client.listTools()).tools.length).toBeGreaterThan(0);
+    await expect(
+      client.callTool({ name: "hindsight_recall", arguments: { query: "facts" } })
+    ).rejects.toThrow();
+    const response = await fetch(`${origin}/mcp`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${projectToken}`,
+        ...headers,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "hindsight_reflect", arguments: { query: "facts" } },
+      }),
+    });
+    expect(response.status).toBe(403);
+    expect(calls).toHaveLength(0);
+  });
   it("validates ASCII aliases and includes them in authorization revisions", () => {
     const revision = policyRevision(config, config.clients[0]);
     config.bankAliases = { "project-alpha": "alpha" };

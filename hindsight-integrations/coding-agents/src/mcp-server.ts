@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { pendingConclusionWorkspaces, retryConclusions } from "./core/conclusions";
 import { z } from "zod";
-import { cleanArguments, verifyToolContext } from "./core/tool-context";
+import { assertCanWrite, cleanArguments, verifyToolContext } from "./core/tool-context";
 /**
  * Native TS MCP (stdio) server exposing the `hindsight_*` knowledge-page + recall + capture tools.
  *
@@ -18,13 +18,80 @@ import { cleanArguments, verifyToolContext } from "./core/tool-context";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { type Config } from "./core/config";
 import { resolveHostMemory, resolveCatalogMemory, loadHostConfig } from "./core/host-client";
 import { HindsightClient } from "./core/hindsight";
 import { buildKnowledgeTools, type ToolSpec } from "./core/knowledge-tools";
 import { buildPageTrigger } from "./core/missions";
 import { buildRetainStamp } from "./core/retain-stamp";
+import { callRemoteTool, fetchRemoteCatalog } from "./core/remote-mcp-bridge";
+
+/** A stdio transport only: project identity comes from the signed host hook, never startup cwd. */
+export async function buildRemoteMcpServer(harness: string, cfg: Config): Promise<McpServer> {
+  const shutdown = new AbortController();
+  const catalog = cfg.disabled
+    ? { instructions: "", tools: [] }
+    : await fetchRemoteCatalog(harness, cfg, shutdown.signal);
+  if (catalog.tools.some((tool) => "bank_id" in (tool.inputSchema.properties ?? {})))
+    throw new Error("remote_project_catalog_required");
+  const tools = catalog.tools.map((tool) => {
+    const properties = tool.inputSchema.properties ?? {};
+    return {
+      ...tool,
+      inputSchema: {
+        ...tool.inputSchema,
+        properties: {
+          ...properties,
+          _context: {
+            type: "string",
+            description: "Internal trusted hook context; do not generate",
+          },
+        },
+        additionalProperties: false,
+      },
+    };
+  });
+  const server = new McpServer(
+    { name: "hindsight", version: "0.1.0" },
+    { instructions: catalog.instructions }
+  );
+  server.server.registerCapabilities({ tools: { listChanged: false } });
+  server.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+  server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    const args = request.params.arguments ?? {};
+    try {
+      const tool = tools.find((candidate) => candidate.name === request.params.name);
+      if (
+        !tool ||
+        Object.keys(args).some((key) => !Object.hasOwn(tool.inputSchema.properties, key))
+      )
+        throw new Error("tool_arguments_unavailable");
+      const claims = verifyToolContext(args._context, request.params.name, args);
+      if (claims.harness !== harness) throw new Error("wrong_harness_context");
+      if (
+        tool.annotations?.readOnlyHint !== true ||
+        ["hindsight_save_conclusion", "hindsight_ingest_document"].includes(request.params.name)
+      )
+        assertCanWrite(claims.mode);
+      return await callRemoteTool(
+        harness,
+        claims.cwd,
+        claims.mode,
+        request.params.name,
+        cleanArguments(args),
+        AbortSignal.any([shutdown.signal, extra.signal])
+      );
+    } catch {
+      return {
+        isError: true,
+        content: [{ type: "text", text: "trusted_project_context_unavailable" }],
+      };
+    }
+  });
+  server.server.onclose = () => shutdown.abort();
+  return server;
+}
 
 /**
  * Which tools this server should expose for a given config. Pure + SDK-free so the
@@ -180,10 +247,15 @@ async function main() {
   // Mirrors that harness's hooks: it selects the config `harnesses.<name>` section and feeds the
   // `{harness}` bank template, so both routes into a repo land in ONE bank.
   const harness = resolveHarness();
+  const global = loadHostConfig(harness);
+  if (global.remoteMcpConfigFile) {
+    const server = await buildRemoteMcpServer(harness, global);
+    await server.connect(new StdioServerTransport());
+    return;
+  }
   const { cfg, bankId, client } = resolveHostMemory(harness, cwd);
 
   const shutdown = new AbortController();
-  const global = loadHostConfig(harness);
   const catalogClient =
     cfg.bankResolution === "registry" ? resolveCatalogMemory(harness, cwd).client : client;
   const server = buildMcpServer(

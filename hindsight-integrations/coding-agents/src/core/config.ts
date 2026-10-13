@@ -13,7 +13,7 @@
  */
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { DEFAULT_SEED_LIMIT } from "./seed";
 import { isOptedIn, pathSection } from "./bank";
 import { log } from "./log";
@@ -53,6 +53,8 @@ export interface RawConfig {
   bankResolution?: "registry" | "upstream";
   /** Private independent project mapping file. */
   projectRegistryFile?: string;
+  /** Trusted private NAS MCP connection file; never accepted from bank/path overrides. */
+  remoteMcpConfigFile?: string;
   /** Where memory lives. All three modes speak the same HTTP API; they differ only in who runs it:
    *   "cloud"       — Hindsight Cloud (the default `apiUrl`)
    *   "self-hosted" — a Hindsight server you run; set `apiUrl` to it
@@ -312,6 +314,8 @@ export interface Config {
   networkConfigured?: boolean;
   bankResolution?: "registry" | "upstream";
   projectRegistryFile?: string;
+  /** Trusted private NAS MCP connection file; never accepted from bank/path overrides. */
+  remoteMcpConfigFile?: string;
   serverMode: "cloud" | "self-hosted" | "daemon";
   /** The EFFECTIVE base URL. In daemon mode this is already 127.0.0.1:{apiPort}, so every caller
    *  that builds a client keeps working without knowing which mode is active. */
@@ -598,6 +602,11 @@ function resolveAutoInject(raw: RawConfig): AutoInject {
 }
 
 export function resolveConfig(raw: RawConfig = {}): Config {
+  if (
+    raw.remoteMcpConfigFile !== undefined &&
+    (typeof raw.remoteMcpConfigFile !== "string" || !isAbsolute(raw.remoteMcpConfigFile))
+  )
+    throw new Error("remote_mcp_config_path_invalid");
   const mode = raw.bankResolution ?? process.env.HINDSIGHT_BANK_RESOLUTION ?? "registry";
   if (mode !== "registry" && mode !== "upstream") throw new Error("invalid_bank_resolution");
   const shared = mode === "registry";
@@ -642,6 +651,7 @@ export function resolveConfig(raw: RawConfig = {}): Config {
       raw.projectRegistryFile ??
       process.env.HINDSIGHT_PROJECT_REGISTRY_FILE ??
       process.env.HINDSIGHT_PROJECT_REGISTRY,
+    remoteMcpConfigFile: raw.remoteMcpConfigFile,
     disabled: raw.disabled ?? false,
     retainSessions: raw.retainSessions ?? !shared, // write sessions back by default, every harness
     manageBankConfig: raw.manageBankConfig ?? !shared,
@@ -924,6 +934,7 @@ export function loadConfig(opts: LoadOptions | string = {}): Config {
 const BANK_OVERRIDE_EXCLUDED = [
   "bankResolution",
   "projectRegistryFile",
+  "remoteMcpConfigFile",
   "bankId",
   "bankIdTemplate",
   "mapPathToBank",

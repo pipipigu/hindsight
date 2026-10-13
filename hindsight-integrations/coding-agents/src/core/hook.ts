@@ -1,3 +1,4 @@
+import { fetchRemoteRules } from "./remote-mcp-bridge";
 import { sharedRecall } from "./shared-recall";
 import {
   MEMORY_SEARCH_GUIDE,
@@ -501,7 +502,7 @@ export async function runHook(
   // session's only record of what the user said, and a slow or unreachable server must not be able
   // to cost the turn. Journaling under `retainSessions: false` writes a temp file nothing reads,
   // which is cheaper than threading that decision through two processes to find out.
-  if (spec.journalPrompt) {
+  if (spec.journalPrompt && !cfg.remoteMcpConfigFile) {
     appendJournalTurn(journalPath(spec.harness, sessionId), { role: "user", content: prompt });
   }
 
@@ -516,6 +517,15 @@ export async function runHook(
   const bankId = resolved.bankId;
   if (cfg.disabled) {
     log.debug(spec.harness, "hook skipped: bank disabled via banks override", { bank: bankId });
+    return;
+  }
+  if (cfg.remoteMcpConfigFile) {
+    try {
+      const rules = await fetchRemoteRules(spec.harness, cwd);
+      if (rules) out(rules);
+    } catch {
+      out(undefined, "NAS MCP rules unavailable; memory tools have no local fallback.");
+    }
     return;
   }
   const client = makeClient({

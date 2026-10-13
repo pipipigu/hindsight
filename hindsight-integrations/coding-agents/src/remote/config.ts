@@ -10,6 +10,11 @@ const clientSchema = z
     mode: z.enum(["library", "project"]),
     allowedBanks: z.union([z.literal("*"), z.array(bank).max(1000)]).optional(),
     bankId: bank.optional(),
+    harness: z
+      .string()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/)
+      .optional(),
+    requireProjectBinding: z.boolean().optional(),
     read: z.boolean(),
     write: z.boolean(),
   })
@@ -24,6 +29,8 @@ const clientSchema = z
       ctx.addIssue({ code: "custom", message: "library_requires_allowed_banks" });
     if (client.write && !client.read)
       ctx.addIssue({ code: "custom", message: "write_requires_read" });
+    if (client.requireProjectBinding && (client.mode !== "project" || !client.harness))
+      ctx.addIssue({ code: "custom", message: "project_binding_requires_project_harness" });
   });
 
 const schema = z

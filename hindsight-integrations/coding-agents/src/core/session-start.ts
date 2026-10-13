@@ -1,3 +1,4 @@
+import { fetchRemoteRules } from "./remote-mcp-bridge";
 import { permissionMode } from "./tool-context";
 import { buildMemoryQueryGuide } from "./recall-guidance";
 import { buildPageTrigger } from "./missions";
@@ -396,6 +397,22 @@ export async function runSessionStartHook(
 
     let cfg = loadConfig({ harness });
     setLogLevel(cfg.logLevel);
+    if (cfg.remoteMcpConfigFile) {
+      if (cfg.disabled) return;
+      try {
+        const rules = await fetchRemoteRules(harness, cwd);
+        if (rules) process.stdout.write(JSON.stringify(spec.emit({ additionalContext: rules })));
+      } catch {
+        process.stdout.write(
+          JSON.stringify(
+            spec.emit({
+              systemMessage: "NAS MCP rules unavailable; memory tools have no local fallback.",
+            })
+          )
+        );
+      }
+      return;
+    }
     syncCompanionSkill(harness); // keep the installed skill current with the package version
     if (cfg.disabled) return;
     // …and keep the package itself current. AFTER the disabled check, unlike the skill sync above:

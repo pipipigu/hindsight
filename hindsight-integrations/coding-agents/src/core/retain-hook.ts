@@ -202,7 +202,7 @@ export async function runRetainHook(
 
   let cfg = loadConfig({ harness: spec.harness });
   setLogLevel(cfg.logLevel);
-  if (cfg.disabled) return;
+  if (cfg.disabled || cfg.remoteMcpConfigFile) return;
 
   // A journal harness closes the turn HERE, at the first point past the kill switch: the host's
   // copy of the reply is ephemeral (ZCode deletes its Stop transcript the moment this hook
@@ -228,7 +228,7 @@ export async function runRetainHook(
   const resolved = applyBankConfig(cfg, derived, cwd);
   cfg = resolved.cfg;
   const bankId = resolved.bankId;
-  if (cfg.disabled) return; // per-bank opt-out (banks.<id> override)
+  if (cfg.disabled || cfg.remoteMcpConfigFile) return; // per-bank opt-out (banks.<id> override)
   // Checked only HERE, after the bank is resolved, so a `banks.<id>` section can turn write-back
   // back on for one repo under a global `retainSessions: false` (and vice versa). Before the
   // daemon start below: a session that writes nothing has no reason to bring a server up.

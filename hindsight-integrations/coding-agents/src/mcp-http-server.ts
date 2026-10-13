@@ -63,6 +63,31 @@ export async function startRemoteServer(configPath: string) {
     if (req.url !== "/mcp") return respond(res, 404, "not_found");
     const principal = authenticate(config, req.headers.authorization);
     if (!principal) return respond(res, 401, "unauthorized");
+    const bankHeader = req.headers["x-hindsight-project-bank"];
+    const harnessHeader = req.headers["x-hindsight-harness"];
+    if (
+      principal.requireProjectBinding ||
+      bankHeader !== undefined ||
+      harnessHeader !== undefined
+    ) {
+      if (
+        principal.mode !== "project" ||
+        typeof bankHeader !== "string" ||
+        !/^[A-Za-z0-9_-]{1,1024}$/.test(bankHeader) ||
+        Buffer.from(bankHeader, "base64url").toString("base64url") !== bankHeader ||
+        Buffer.from(bankHeader, "base64url").toString("utf8") !== principal.bankId ||
+        typeof harnessHeader !== "string" ||
+        harnessHeader !== principal.harness
+      )
+        return respond(res, 403, "project_binding_mismatch");
+    }
+    const catalogHeader = req.headers["x-hindsight-catalog"];
+    const catalogOnly = catalogHeader !== undefined;
+    if (
+      catalogOnly &&
+      (catalogHeader !== "1" || principal.mode !== "project" || !principal.requireProjectBinding)
+    )
+      return respond(res, 403, "catalog_binding_required");
     if (req.method !== "POST") return respond(res, 405, "method_not_allowed");
     let body: unknown;
     try {
@@ -75,6 +100,20 @@ export async function startRemoteServer(configPath: string) {
       );
     }
     if (Array.isArray(body)) return respond(res, 400, "batch_requests_not_supported");
+    if (
+      catalogOnly &&
+      (!body ||
+        typeof body !== "object" ||
+        !("method" in body) ||
+        ![
+          "initialize",
+          "notifications/initialized",
+          "tools/list",
+          "ping",
+          "notifications/cancelled",
+        ].includes(String(body.method)))
+    )
+      return respond(res, 403, "catalog_metadata_only");
     const isToolCall =
       !!body && typeof body === "object" && "method" in body && body.method === "tools/call";
     let leased = false;
@@ -98,7 +137,7 @@ export async function startRemoteServer(configPath: string) {
     const cancel = new AbortController();
     active.add(cancel);
     const signal = AbortSignal.any([shutdown.signal, cancel.signal, AbortSignal.timeout(345000)]);
-    const server = buildRemoteServer(configPath, config, principal, signal);
+    const server = buildRemoteServer(configPath, config, principal, signal, catalogOnly);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,

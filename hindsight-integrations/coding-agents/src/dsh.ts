@@ -33,6 +33,7 @@ import { diag } from "./core/diag";
 import type { ToolSpec } from "./core/knowledge-tools";
 import { log } from "./core/log";
 import { RuntimeCore } from "./core/runtime";
+import { fetchRemoteCatalog, fetchRemoteRules, callRemoteTool } from "./core/remote-mcp-bridge";
 import { HINDSIGHT_PLUGIN, readDshEvents, type DshSessionEvent } from "./core/transcript-dsh";
 
 const HARNESS = "dsh";
@@ -104,7 +105,10 @@ interface DshContext {
     event: "agent/disposed",
     listener: (payload: { agent: DshAgent }) => void
   ): (() => void) | void;
-  inject(names: string[], callback: (ctx: DshToolContext) => void): void;
+  inject(
+    names: string[],
+    callback: (ctx: DshToolContext) => void | Promise<void>
+  ): void | PromiseLike<unknown>;
 }
 
 interface DshToolContext {
@@ -118,6 +122,7 @@ interface DshToolContext {
 /** `exec` as a dsh tool body receives it (only the caller matters to us). */
 interface DshToolRunContext {
   readonly agent?: DshAgent;
+  readonly signal?: AbortSignal;
 }
 
 // ── per-workspace runtime cache ─────────────────────────────────────────────────
@@ -438,6 +443,119 @@ function specsOf(workspace: Workspace): ToolSpec[] {
 
 // ── cordis entrypoint ───────────────────────────────────────────────────────────
 
+/** NAS mode owns only transport and host context; all public rules and schemas are remote. */
+export async function applyRemoteDsh(ctx: DshContext): Promise<void> {
+  const lifetime = new AbortController();
+  const sessions = new WeakMap<DshSession, AbortController>();
+  const active = new Set<AbortController>();
+  const seen = new WeakMap<DshSession, Set<string>>();
+  ctx.effect?.(
+    () => () => {
+      lifetime.abort();
+      for (const controller of active) controller.abort();
+      active.clear();
+    },
+    "hindsight.remote-mcp"
+  );
+  function sessionSignal(agent: DshAgent): AbortSignal {
+    let controller = sessions.get(agent.session);
+    if (!controller) {
+      controller = new AbortController();
+      sessions.set(agent.session, controller);
+      active.add(controller);
+    }
+    return controller.signal;
+  }
+  ctx.on("agent/disposed", ({ agent }) => {
+    const controller = sessions.get(agent.session);
+    controller?.abort();
+    if (controller) active.delete(controller);
+    sessions.delete(agent.session);
+    seen.delete(agent.session);
+  });
+  ctx.on(
+    "agent/pre-step",
+    async ({ agent, signal, turn }, next) => {
+      const decision = await next();
+      const cwd = agent.session.header.cwd;
+      if (decision.kind !== "enter" || signal.aborted || !cwd || !promptOf(decision.messages))
+        return decision;
+      const key = JSON.stringify([
+        turn,
+        decision.messages.filter((m) => m.source.kind === "user").map((m) => m.id),
+        promptOf(decision.messages),
+      ]);
+      const previous = seen.get(agent.session) ?? new Set<string>();
+      if (previous.has(key)) return decision;
+      previous.add(key);
+      if (previous.size > 200) previous.delete(previous.values().next().value!);
+      seen.set(agent.session, previous);
+      const combined = AbortSignal.any([signal, lifetime.signal, sessionSignal(agent)]);
+      let rules: string | null;
+      try {
+        rules = await fetchRemoteRules(HARNESS, cwd, combined);
+      } catch {
+        if (combined.aborted) return decision;
+        rules = "Hindsight NAS MCP 连接不可用；本轮未获取公共记忆规则。";
+        diag(HARNESS, "remote_rules_unavailable", { session: agent.session.header.id });
+      }
+      if (!rules || combined.aborted) return decision;
+      return {
+        kind: "enter",
+        messages: [
+          ...decision.messages,
+          injectionMessage(
+            `${rules}\n当前宿主：DSH；权限状态：${dshPermissionMode(agent)}。项目由本会话工作目录绑定，模型不得覆盖库或权限。`
+          ),
+        ],
+      };
+    },
+    { prepend: true }
+  );
+
+  // Installed Cordis fiber._execute awaits callback.then(safeCollect), and inject returns a
+  // PromiseLike fiber. Await the child so the catalog is registered before plugin startup ends.
+  await ctx.inject(["tools"], async (toolCtx) => {
+    const catalog = await fetchRemoteCatalog(HARNESS, loadHostConfig(HARNESS), lifetime.signal);
+    if (lifetime.signal.aborted) return;
+    for (const spec of catalog.tools) {
+      toolCtx.tools.register({
+        name: spec.name,
+        description: spec.description ?? "",
+        parameters: spec.inputSchema,
+        output: {
+          schema: { type: "string" },
+          render: (_args: unknown, value: string) => [{ type: "text", text: value }],
+        },
+        async execute(args: Record<string, unknown>, exec: DshToolRunContext): Promise<string> {
+          const agent = exec?.agent;
+          const cwd = agent?.session.header.cwd;
+          if (!agent || !cwd) throw new Error("remote_project_context_missing");
+          const signal = AbortSignal.any([
+            lifetime.signal,
+            sessionSignal(agent),
+            ...(exec.signal ? [exec.signal] : []),
+          ]);
+          const result = await callRemoteTool(
+            HARNESS,
+            cwd,
+            dshPermissionMode(agent),
+            spec.name,
+            args,
+            signal
+          );
+          const text = result.content
+            .filter((block) => block.type === "text")
+            .map((block) => block.text)
+            .join("\n");
+          if (result.isError) throw new Error(text || "hindsight tool failed");
+          return text;
+        },
+      });
+    }
+  });
+}
+
 /** Read permission state from the caller's scoped preset, never the plugin's global context. */
 export function dshPermissionMode(agent?: DshAgent): PermissionMode {
   if (!agent) return "unknown";
@@ -492,7 +610,8 @@ export function dshPermissionMode(agent?: DshAgent): PermissionMode {
 }
 
 /** Bind listeners and tools to the owning Cordis fiber. */
-export function apply(ctx: DshContext): void {
+export function apply(ctx: DshContext): void | Promise<void> {
+  if (loadHostConfig(HARNESS).remoteMcpConfigFile) return applyRemoteDsh(ctx);
   ctx.effect?.(
     () => () => {
       for (const work of workspaces.values()) work?.core.dispose();

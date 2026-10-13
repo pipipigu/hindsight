@@ -30,7 +30,7 @@ in front of the agent at the moment it starts working, and keeps a curated set o
 
 ## Remote MCP (HTTP)
 
-远端入口与本机工作区 Hook 共用工具核心，独立部署；`library` 身份可查授权库，调用需指定 `bank_id`，保存还需写权限、证据与已有库。`project` 身份固定库，禁止参数覆盖；不暴露建库、删除、自动采集或导入。保存沿用 `project_conclusions_v1` 与可恢复回执，策略缺失拒绝普通提取回退。
+远端入口与本机工作区 Hook 共用工具核心，独立部署；`library` 身份可查授权库，调用需指定 `bank_id`，保存还需写权限、证据与已有库。`project` 身份固定库，禁止参数覆盖，写身份保留明确文档导入；不暴露建库、删除或自动采集。保存沿用 `project_conclusions_v1` 与可恢复回执，策略缺失拒绝普通提取回退。
 
 构建后设置 `HINDSIGHT_REMOTE_CONFIG` 运行 `node dist/mcp-http-server.js`。配置示例及容器入口见 [deploy/remote](deploy/remote)。API 后端凭据仅留服务端；每个 Agent 使用独立随机 Bearer Token，配置只存其 SHA256 到 `clients[].tokenHash`。`read/write` 与库范围独立；授权配置下次调用重读，监听地址修改需重启。默认工具并发全局8、每身份2，超过返回429；不接受批量请求。
 
@@ -44,7 +44,9 @@ cp deploy/remote/config.example.json deploy/remote/config/remote.json
 docker compose -f deploy/remote/compose.yaml up -d --build
 ```
 
-反代 `/mcp` 时保留 Host/Authorization，关闭缓存与响应缓冲并容纳长 Reflect。当前支持 Header/Bearer，OAuth-only 客户端尚不支持。`toolGuideExtra` 从本机统一配置复制到远端配置，后续更改需同步；远端通过服务端指令与工具说明提供规则，不能执行客户端 Hook。具体 Notion 连接仍需现场验收。
+反代 `/mcp` 时保留 Host/Authorization，关闭缓存与响应缓冲并容纳长 Reflect。当前支持 Header/Bearer，OAuth-only 客户端尚不支持。公共提示在 NAS 的 `toolGuideExtra` 维护，通过初始化指令与工具说明下发；本机转发模式每轮读取新提示，旧 REST 接入仍需自行同步提示。远端不能直接执行客户端 Hook。具体 Notion 连接仍需现场验收。
+
+本机 Codex／DSH 可设置可信 `remoteMcpConfigFile`，指向当前用户所有、权限600的私有 JSON：`{"endpoint":"https://memory.example.com/mcp","projects":{"codex":{"实际库ID":{"readToken":"项目只读令牌","writeToken":"项目写令牌"}}}}`。每个项目/宿主在 NAS 配独立 `project` 身份，设置 `harness` 与 `requireProjectBinding:true`。本机按真实工作区选择读写身份，计划或未知权限拒写；映射变化取消在途调用，不回退旧 API。工具与每轮公共提示直接取 NAS，NAS 的 `toolGuideExtra` 成为规则来源，本机同名字段不生效。目录连接只发现工具，不执行工具；知识页查询与保存均在 NAS 完成。本机旧后台任务停用，已有知识页的后端刷新配置保留。
 
 ## Install
 
