@@ -9,6 +9,9 @@ services:
     restart: unless-stopped
     init: true
     network_mode: bridge
+    environment:
+      RECALL_DEFAULT_TYPES: "${RECALL_DEFAULT_TYPES:-new}"
+      GUIDANCE_VERSION: "${GUIDANCE_VERSION:-v4}"
     read_only: true
     cap_drop:
       - ALL

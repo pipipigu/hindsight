@@ -1,6 +1,7 @@
 import { assertCanWrite, type PermissionMode } from "./tool-context";
 import { saveConclusion, conclusionStatus, CONCLUSION_GUIDE } from "./conclusions";
 import { MEMORY_EVIDENCE_GUIDE } from "./recall-guidance";
+import { GUIDANCE_VERSION, RECALL_DEFAULT_TYPES_MODE } from "./recall-policy";
 import {
   recallQueryShape,
   observationsQueryShape,
@@ -278,6 +279,12 @@ export function buildKnowledgeTools(
           (observations
             ? "Search consolidated observations for summarized experience or rules in the current project, including their supporting facts by default. "
             : "For concrete facts, prefer this tool: recall factual memories and experiences in the current project using the same API as the web Recall analyzer. ") +
+          (!observations && GUIDANCE_VERSION === "v4"
+            ? (RECALL_DEFAULT_TYPES_MODE === "new"
+                ? "默认纳入融合观察和原始事实检索，"
+                : "默认只检索原始事实；现状核对可传 types=null 纳入观察，") +
+              '回答现状前须相互核对；证据不足时按需补查相关事实或观察。只看原始事实或问历史时，可传 types=["world","experience"]。 '
+            : "") +
           "Default compact output returns up to 5 complete ranked facts within a 3000-token estimate for the WHOLE JSON, including sources (segmented cl100k_base, provider usage differs). omitted_count counts fetched facts not shown; requires_read is an address, not evidence. Use hindsight_read_memory for a specific fact/original, instead of increasing max_tokens or requesting many chunks. seen_ids omits text already visible in this conversation; references are recoverable via read_memory. Stop when evidence suffices; further queries must address a specific gap. Raw/trace output is unbounded and only for an explicitly requested detailed/debug inspection. F/C references resolve through sources/chunks; source_ids identifies missing supporting facts. max_tokens controls server text, not the whole output.",
         inputSchema: observations ? observationsQueryShape : recallQueryShape,
         annotations: READ_ONLY_ANNOTATIONS,

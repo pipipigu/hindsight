@@ -6,3 +6,6 @@ dist/
 deploy/remote/config/
 deploy/remote/data/
 deploy/remote/.env
+# Private production-memory regression captures; never ship them with the package.
+tests/fixtures/baseline/
+tests/fixtures/current-state/

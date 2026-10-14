@@ -119,7 +119,7 @@ describe("explicit memory queries", () => {
     await client.queryMemories(parseRecallQuery({ query: "current question" }, false));
     expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toEqual({
       query: "current question",
-      types: ["world", "experience"],
+      types: null,
       budget: "mid",
       max_tokens: 4096,
       include: { entities: null },

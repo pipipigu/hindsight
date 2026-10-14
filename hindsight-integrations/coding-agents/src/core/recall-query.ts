@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { sanitizeSharedText } from "./shared-sanitize";
+import { RECALL_DEFAULT_TYPES_MODE } from "./recall-policy";
 
 const tokens = z.number().int().min(1).max(32768);
 const tokenOptions = z.object({ max_tokens: tokens.optional() }).strict();
@@ -65,7 +66,11 @@ export const recallQueryShape = {
     .min(1)
     .nullable()
     .optional()
-    .describe("Recall only: default world and experience; null searches all types"),
+    .describe(
+      RECALL_DEFAULT_TYPES_MODE === "legacy"
+        ? "Recall only: default world and experience; null searches all types"
+        : "Recall only: default searches world, experience and observation; explicit types override; null searches all types"
+    ),
   budget: z
     .enum(["low", "mid", "high"])
     .optional()
@@ -182,7 +187,9 @@ export function parseRecallQuery(args: unknown, observations: boolean): RecallQu
     types: observations
       ? ["observation"]
       : parsed.types === undefined
-        ? ["world", "experience"]
+        ? RECALL_DEFAULT_TYPES_MODE === "legacy"
+          ? ["world", "experience"]
+          : null
         : parsed.types,
   };
 }

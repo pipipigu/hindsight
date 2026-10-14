@@ -148,7 +148,7 @@ describe("compact Recall evidence", () => {
       const input = { query: "question", output_format, max_tokens: 4096, trace: true };
       expect(parseRecallQuery(input, false)).toEqual({
         query: "question",
-        types: ["world", "experience"],
+        types: null,
         budget: "mid",
         max_tokens: 4096,
         trace: true,

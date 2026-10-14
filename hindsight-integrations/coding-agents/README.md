@@ -30,6 +30,8 @@ in front of the agent at the moment it starts working, and keeps a curated set o
 
 ## Remote MCP (HTTP)
 
+0.8.1 的 `hindsight_recall` 默认纳入事实和观察，不改变服务端排序，显式 `types` 优先。现状回答须核对业务时间、局部变更和原始依据；规则变更在保存正文中写清范围、旧新内容、生效日期和可确认的旧 ID。回退时设置 `RECALL_DEFAULT_TYPES=legacy`、`GUIDANCE_VERSION=v1`，重建并重启 MCP；前者恢复查询默认值，后者恢复结果与工具说明。生产记忆不随开关变化。
+
 远端入口与本机工作区 Hook 共用工具核心，独立部署；`library` 身份可查授权库，调用需指定 `bank_id`，保存还需写权限、证据与已有库。`project` 身份固定库，禁止参数覆盖，写身份保留明确文档导入；不暴露建库、删除或自动采集。保存沿用 `project_conclusions_v1` 与可恢复回执，策略缺失拒绝普通提取回退。
 
 构建后设置 `HINDSIGHT_REMOTE_CONFIG` 运行 `node dist/mcp-http-server.js`。配置示例及容器入口见 [deploy/remote](deploy/remote)。API 后端凭据仅留服务端；每个 Agent 使用独立随机 Bearer Token，配置只存其 SHA256 到 `clients[].tokenHash`。`read/write` 与库范围独立；授权配置下次调用重读，监听地址修改需重启。默认工具并发全局8、每身份2，超过返回429；不接受批量请求。
