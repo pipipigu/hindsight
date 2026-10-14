@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
 import { permissionMode, signToolContext } from "./core/tool-context";
+import { projectDiagnostic } from "./core/project-diagnostics";
 import { loadConfig } from "./core/config";
 import { resolveRegisteredProject } from "./core/project-registry";
 
@@ -17,7 +18,8 @@ try {
     const harness = process.argv[2] === "claude-code" ? "claude-code" : "codex";
     const cfg = loadConfig({ harness });
     if (cfg.bankResolution === "registry") {
-      if (cfg.disabled || typeof ev.cwd !== "string" || typeof ev.session_id !== "string")
+      if (cfg.disabled) throw new Error("project_disabled");
+      if (typeof ev.cwd !== "string" || typeof ev.session_id !== "string")
         throw new Error("trusted_workspace_required");
       resolveRegisteredProject(ev.cwd, cfg.projectRegistryFile);
       const input = (ev.tool_input ?? {}) as Record<string, unknown>;
@@ -43,13 +45,14 @@ try {
       );
     }
   }
-} catch {
+} catch (e) {
+  const diagnostic = projectDiagnostic(e, "trusted_project_context_unavailable");
   process.stdout.write(
     JSON.stringify({
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: "deny",
-        permissionDecisionReason: "Hindsight project context unavailable",
+        permissionDecisionReason: `Hindsight project context unavailable: ${diagnostic.code} (${diagnostic.stage})`,
       },
     })
   );

@@ -14,7 +14,9 @@ explains what happens automatically, which tools you have, and how to configure 
 
 ## Registry mode (this fork's default)
 
-Projects use the independent directory registry, not Git-derived bank names. Unmapped projects are inactive. Automatic retrieval defaults to `autoInject: "none"`: the host injects rules without fetching evidence or a page roster; the agent queries explicitly. Automatic conversation capture and Git import are off. Save only new durable preferences, decisions, verified facts or reusable debugging conclusions with `hindsight_save_conclusion(content, evidence)`; never save routine progress or guesses, and do not save on a quota. Only `completed` confirms extraction. Plan or unknown host permissions are read-only. The five knowledge pages remain automatic. The behavior described below applies to explicit upstream compatibility mode.
+Projects use the independent directory registry, not Git-derived bank names. Unmapped projects are inactive. Automatic retrieval defaults to `autoInject: "none"`: the host injects rules without fetching evidence or a page roster; the agent queries explicitly. Automatic conversation capture, Git import and page maintenance are off. Save only new durable preferences, decisions, verified facts or reusable debugging conclusions with `hindsight_save_conclusion(content, evidence)`; never save routine progress or guesses, and do not save on a quota. Only `completed` confirms extraction. Plan or unknown host permissions are read-only. The behavior described below applies to explicit upstream compatibility mode.
+
+项目接入使用 README 中的独立 `project-admin`，普通 MCP 不获得管理权限。代理按目录证据起草中文心智模型，列明用途、范围、查询、来源和待确认项，默认手动刷新。展示 `models-preview` 后取得真实用户批准，才可按对应 hash 执行 `models-apply`；hash 不代表授权。不自动套用五页或把草案导入为事实，空库首次生成可能缺证。
 
 每轮先按当前上下文判断是否需要新的历史证据；确认、衔接或当前对话足以处理时直接执行，用户明确要求查记忆或存在证据缺口时主动查询。Codex 首轮完整规则、后续短提醒，项目或规则变化时刷新。需要查询时，记忆先于本地文件与代码检索：具体事实优先 `hindsight_recall`，归纳经验用 `hindsight_search_observations`，概览与专题用知识页搜索，综合整理可直接用 `hindsight_reflect`。按需选择，不必全部调用；证据足够就停，补查只针对缺口。提案、历史报告与二次摘要须注明范围和时间；声称现行须有实施证据，导入时间不代表实施时间；不同模块不能直接拼接规则。推导须标明，冲突或缺失保留待确认；只凭记忆时不查本地。工具绑定当前项目库，保留服务端排序；`temporal_window` 影响排序，不是严格日期过滤。
 

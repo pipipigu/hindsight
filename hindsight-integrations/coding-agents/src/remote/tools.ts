@@ -1,3 +1,4 @@
+import { projectErrorResult } from "../core/project-diagnostics";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { DEFAULT_OBSERVATION_SCOPES, HindsightClient } from "../core/hindsight";
@@ -174,7 +175,7 @@ export function buildRemoteServer(
       ? `当前连接固定绑定项目记忆库 ${publicBankId(config, principal.bankId!)}；工具参数不接受库或目录覆盖。`
       : "当前连接可查询授权库；用 hindsight_list_banks 选择相关库，查询与保存均须明确 bank_id，勿默认遍历全部库。";
   const server = new McpServer(
-    { name: "hindsight-remote", version: "0.8.1" },
+    { name: "hindsight-remote", version: "0.9.0" },
     { instructions: [instructions, scope, extra].filter(Boolean).join("\n") }
   );
   if (!principal.read) return server;
@@ -335,8 +336,8 @@ export function buildRemoteServer(
               };
             }),
           };
-        } catch {
-          return error("remote_request_denied");
+        } catch (e) {
+          return projectErrorResult(e, "remote_request_denied");
         }
       }
     );

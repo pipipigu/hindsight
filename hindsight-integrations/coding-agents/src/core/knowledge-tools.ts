@@ -44,7 +44,7 @@ import type { HindsightClient } from "./hindsight";
 import { syncStatus } from "./status";
 import { applyBankConfig, DEFAULT_REFLECT_TOOL_TIMEOUT_MS, loadConfig } from "./config";
 import { diagFilePath } from "./diag";
-import { describeError } from "./log";
+import { projectErrorResult } from "./project-diagnostics";
 import type { RetainStamp } from "./retain-stamp";
 import type { PageTrigger } from "./missions";
 
@@ -160,8 +160,9 @@ const pageReadShape = {
 };
 
 function err(e: unknown): ToolResult {
-  const message = describeError(e);
-  return { content: [{ type: "text", text: JSON.stringify({ error: message }) }], isError: true };
+  if (e instanceof Error && publicReadError.test(e.message))
+    return { isError: true, content: [{ type: "text", text: e.message }] };
+  return projectErrorResult(e);
 }
 
 /** Wrap a handler body so a thrown client error always becomes an isError:true result, never a throw. */
@@ -336,18 +337,7 @@ export function buildKnowledgeTools(
             throw new Error("project_scope_changed");
           return output;
         } catch (e) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text",
-                text:
-                  e instanceof Error && publicReadError.test(e.message)
-                    ? e.message
-                    : "memory_request_failed",
-              },
-            ],
-          };
+          return err(e);
         }
       },
     },
@@ -604,18 +594,19 @@ export function buildKnowledgeTools(
         if (tool.name === "hindsight_sync_status")
           return ok({ bank: bankId, queue: conclusionStatus(client) });
         const result = await tool.handler(args, context);
-        return result.isError && !publicReadError.test(result.content.map((c) => c.text).join("\n"))
-          ? { isError: true, content: [{ type: "text", text: "memory_request_failed" }] }
-          : result;
+        if (!result.isError) return result;
+        // Keep the established bounded-read error strings compatible with existing callers.
+        if (publicReadError.test(result.content[0]?.text ?? "")) return result;
+        // Inner handlers already encode diagnostics. Reclassify only their fixed error code.
+        let code: unknown;
+        try {
+          code = JSON.parse(result.content[0]?.text ?? "").error;
+        } catch {
+          code = result.content[0]?.text;
+        }
+        return projectErrorResult(code);
       } catch (e) {
-        const message =
-          e instanceof Error &&
-          /^(plan_readonly|host_permission_unavailable|project_[a-z_]+|remote_[a-z_]+|conclusion_[a-z_]+)$/.test(
-            e.message
-          )
-            ? e.message
-            : "memory_request_failed";
-        return { isError: true, content: [{ type: "text", text: message }] };
+        return projectErrorResult(e);
       }
     },
   }));

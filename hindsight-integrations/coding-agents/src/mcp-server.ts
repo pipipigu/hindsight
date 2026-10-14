@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { pendingConclusionWorkspaces, retryConclusions } from "./core/conclusions";
+import { projectErrorResult } from "./core/project-diagnostics";
 import { z } from "zod";
 import { assertCanWrite, cleanArguments, verifyToolContext } from "./core/tool-context";
 /**
@@ -53,7 +54,7 @@ export async function buildRemoteMcpServer(harness: string, cfg: Config): Promis
     };
   });
   const server = new McpServer(
-    { name: "hindsight", version: "0.1.0" },
+    { name: "hindsight", version: "0.9.0" },
     { instructions: catalog.instructions }
   );
   server.server.registerCapabilities({ tools: { listChanged: false } });
@@ -82,11 +83,8 @@ export async function buildRemoteMcpServer(harness: string, cfg: Config): Promis
         cleanArguments(args),
         AbortSignal.any([shutdown.signal, extra.signal])
       );
-    } catch {
-      return {
-        isError: true,
-        content: [{ type: "text", text: "trusted_project_context_unavailable" }],
-      };
+    } catch (e) {
+      return projectErrorResult(e, "trusted_project_context_unavailable");
     }
   });
   server.server.onclose = () => shutdown.abort();
@@ -141,11 +139,8 @@ export function selectTools(
         ).find((t) => t.name === tool.name);
         if (!bound) throw new Error("tool_unavailable");
         return await bound.handler(cleanArguments(args), { permission: claims.mode });
-      } catch {
-        return {
-          isError: true,
-          content: [{ type: "text", text: "trusted_project_context_unavailable" }],
-        };
+      } catch (e) {
+        return projectErrorResult(e, "trusted_project_context_unavailable");
       }
     },
   }));
@@ -218,7 +213,7 @@ export function resolveProjectCwd(
  * keeps that privacy boundary intact while preventing one optional probe from failing startup.
  */
 export function buildMcpServer(tools: ToolSpec[]): McpServer {
-  const server = new McpServer({ name: "hindsight", version: "0.1.0" });
+  const server = new McpServer({ name: "hindsight", version: "0.9.0" });
   if (tools.length === 0) {
     server.server.registerCapabilities({ tools: { listChanged: false } });
     server.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }));

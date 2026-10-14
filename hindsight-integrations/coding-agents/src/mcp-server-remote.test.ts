@@ -96,6 +96,42 @@ describe("NAS stdio adapter", () => {
     await expect(connect()).rejects.toThrow("remote_project_catalog_required");
     expect(bridge.call).not.toHaveBeenCalled();
   });
+  it("reports missing project credentials without hiding the failing stage", async () => {
+    bridge.call.mockRejectedValue(new Error("remote_project_credential_missing"));
+    const { client } = await connect();
+    const result = await client.callTool({ name: recall, arguments: signed({ query: "facts" }) });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse((result.content as { text: string }[])[0].text)).toEqual({
+      error: "remote_project_credential_missing",
+      code: "remote_project_credential_missing",
+      stage: "project_credentials",
+    });
+  });
+  it("does not release unknown transport exception details", async () => {
+    bridge.call.mockRejectedValue(new Error("GET /private/path Bearer SECRET upstream body"));
+    const { client } = await connect();
+    const result = await client.callTool({ name: recall, arguments: signed({ query: "facts" }) });
+    expect(JSON.stringify(result)).not.toMatch(/SECRET|private|Bearer|upstream/);
+    expect(result.isError).toBe(true);
+    expect(JSON.parse((result.content as { text: string }[])[0].text)).toMatchObject({
+      code: "trusted_project_context_unavailable",
+      stage: "trusted_context",
+    });
+  });
+  it("still rejects a changed signed input with a specific safe context diagnostic", async () => {
+    const { client } = await connect();
+    const args = signed({ query: "original" });
+    const result = await client.callTool({
+      name: recall,
+      arguments: { ...args, query: "tampered" },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse((result.content as { text: string }[])[0].text)).toMatchObject({
+      code: "expired_or_changed_tool_context",
+      stage: "trusted_context",
+    });
+    expect(bridge.call).not.toHaveBeenCalled();
+  });
   it("uses the signed actual workspace rather than the App launch directory", async () => {
     const cwd = vi.spyOn(process, "cwd").mockReturnValue("/home/user");
     try {

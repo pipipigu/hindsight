@@ -50,6 +50,22 @@ docker compose -f deploy/remote/compose.yaml up -d --build
 
 本机 Codex／DSH 可设置可信 `remoteMcpConfigFile`，指向当前用户所有、权限600的私有 JSON：`{"endpoint":"https://memory.example.com/mcp","projects":{"codex":{"实际库ID":{"readToken":"项目只读令牌","writeToken":"项目写令牌"}}}}`。每个项目/宿主在 NAS 配独立 `project` 身份，设置 `harness` 与 `requireProjectBinding:true`。本机按真实工作区选择读写身份，计划或未知权限拒写；映射变化取消在途调用，不回退旧 API。工具与每轮公共提示直接取 NAS，NAS 的 `toolGuideExtra` 成为规则来源，本机同名字段不生效。目录连接只发现工具，不执行工具；知识页查询与保存均在 NAS 完成。本机旧后台任务停用，已有知识页的后端刷新配置保留。
 
+### Project initialization
+
+独立管理 CLI 要求中文显示名；`doctor` 只读，`init` 补齐注册、库、策略和身份，保留已有凭据、拒绝冲突。管理员凭据留在 NAS，本地令牌权限600。先在 NAS 放置 `dist/project-admin.js`：
+
+```bash
+node dist/project-admin.js doctor --directory /path/project --bank-id p-example --name 示例项目 \
+  --ssh-host nas --remote-cli /srv/memory/dist/project-admin.js --server-config /srv/memory/config/remote.json
+# 将 doctor 换成 init 才补配置；新私有配置需另传 --endpoint https://memory.example.com/mcp。
+node dist/project-admin.js draft-context --directory /path/project
+node dist/project-admin.js models-preview --plan /path/model-plan.json
+# 真实用户批准该草案后，使用预览 hash；管理连接参数同上。
+node dist/project-admin.js models-apply --plan /path/model-plan.json --approve SHA256 --server-config /path/remote.json
+```
+
+AI 按 `draft-context` 模板和目录证据起草，不读取 Notebook 输出。`source_query` 必须含中文名和完整 `scope`；用户确认预览后按对应 hash 执行。默认手动刷新，首次生成需要库内记忆。相同模型跳过，冲突拒绝覆盖，未知创建状态不盲重试。
+
 ## Install
 
 <!-- skill:begin title="Install / update" -->

@@ -4,6 +4,7 @@ export default defineConfig({
   entry: {
     "shared-context-hook": "src/shared-context-hook.ts",
     "project-registry": "src/project-registry.ts",
+    "project-admin": "src/project-admin.ts",
     index: "src/index.ts",
     // opencode v2 (`opencode2`) loads this via the package's root index.js, which re-exports it.
     // Its plugin contract shares nothing with v1's, so it is a separate entry — see src/opencode2.ts.

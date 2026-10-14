@@ -1,3 +1,4 @@
+import { projectDiagnostic } from "./project-diagnostics";
 import { sanitizeSharedText } from "./shared-sanitize";
 import { semverGte } from "./util";
 import { createHash } from "node:crypto";
@@ -144,7 +145,13 @@ export async function saveConclusion(client: HindsightClient, args: unknown, har
       state: string;
       error: string | null;
     };
-    return { id, ...row, deduplicated: result.changes === 0, strategy: CONCLUSION_STRATEGY };
+    return {
+      id,
+      ...row,
+      ...(row.error ? { diagnostic: projectDiagnostic(row.error) } : {}),
+      deduplicated: result.changes === 0,
+      strategy: CONCLUSION_STRATEGY,
+    };
   } finally {
     db.close();
   }

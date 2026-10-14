@@ -643,6 +643,20 @@ describe("remote HTTP MCP", () => {
     expect(text(result)).toContain("remote_directory_too_large");
     expect(calls.filter((call) => call.url.startsWith("/v1/default/banks?"))).toHaveLength(1);
   });
+  it("reports bank absence as a bank-stage error rather than a missing memory", async () => {
+    const client = await connect();
+    const result = await client.callTool({
+      name: "hindsight_recall",
+      arguments: { bank_id: "missing", query: "project facts" },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse((result.content as { text: string }[])[0].text)).toMatchObject({
+      code: "project_bank_missing",
+      stage: "memory_bank",
+    });
+    expect(text(result)).not.toContain(backendToken);
+    expect(calls.some((call) => call.url.endsWith("/memories/recall"))).toBe(false);
+  });
   it("requires explicit authorized existing destination and evidence for saves", async () => {
     const client = await connect(writeToken);
     for (const args of [

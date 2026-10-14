@@ -483,7 +483,11 @@ describe("context and durable conclusions", () => {
   it("never falls back when the conclusion strategy is absent", async () => {
     const f = await api();
     f.state.strategy = false;
-    expect((await saveConclusion(f.memory.client, conclusion, "codex")).state).toBe("failed");
+    expect(await saveConclusion(f.memory.client, conclusion, "codex")).toMatchObject({
+      state: "failed",
+      error: "conclusion_strategy_missing",
+      diagnostic: { code: "conclusion_strategy_missing", stage: "retain_strategy" },
+    });
     expect(f.calls.some((c) => c.method === "POST" && c.path.endsWith("/memories"))).toBe(false);
     await expect(
       saveConclusion(f.memory.client, { content: "missing evidence" }, "codex")
@@ -549,6 +553,14 @@ describe("context and durable conclusions", () => {
   it("refuses an absent remote bank before any mutation", async () => {
     const f = await api();
     f.state.bankExists = false;
+    const result = await buildKnowledgeTools(f.memory.client, "p-project", { repoDir: project })
+      .find((tool) => tool.name === "hindsight_read_memory")!
+      .handler({ memory_id: "1879fd64-3331-4a4a-b0a1-f6db87f7db20" });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      code: "project_bank_missing",
+      stage: "memory_bank",
+    });
     await expect(f.memory.client.seedPages()).rejects.toThrow("project_bank_missing");
     expect(f.calls.some((c) => c.method !== "GET")).toBe(false);
   });
