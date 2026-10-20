@@ -93,12 +93,125 @@ describe("NAS workspace bridge", () => {
       "X-Hindsight-Harness": "codex",
     });
   });
+  it.each([
+    { timeoutMs: undefined, deadline: 15000 },
+    { timeoutMs: 2500, deadline: 2500 },
+  ])("aborts rules discovery at $deadline ms", async ({ timeoutMs, deadline }) => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | undefined;
+      mock.connect.mockImplementation(
+        (_transport, options) =>
+          new Promise((_resolve, reject) => {
+            signal = options.signal;
+            signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
+          })
+      );
+      const pending = fetchRemoteRules("codex", root, undefined, timeoutMs);
+      const rejection = expect(pending).rejects.toThrow("remote_mcp_timeout");
+      await vi.advanceTimersByTimeAsync(deadline - 1);
+      expect(signal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await rejection;
+      expect(signal?.aborted).toBe(true);
+      expect(mock.close).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it("returns original catalog and uses write identity only for discovery", async () => {
     const catalog = await fetchRemoteCatalog("codex", loadConfig({ harness: "codex" }));
     expect(catalog.tools[0].description).toBe("NAS description");
     expect(mock.call).not.toHaveBeenCalled();
     expect(mock.transport.mock.calls[0][1].requestInit.headers.Authorization).toBe(
       `Bearer ${writeToken}`
+    );
+  });
+  it("discovers a subagent catalog with only the read identity and read tools", async () => {
+    mock.list.mockResolvedValueOnce({
+      tools: [
+        {
+          name: "hindsight_recall",
+          annotations: { readOnlyHint: true },
+          inputSchema: { type: "object" },
+        },
+        {
+          name: "hindsight_save_conclusion",
+          annotations: { readOnlyHint: false },
+          inputSchema: { type: "object" },
+        },
+      ],
+    });
+    const catalog = await fetchRemoteCatalog(
+      "codex",
+      loadConfig({ harness: "codex" }),
+      undefined,
+      "read-only"
+    );
+    expect(catalog.tools.map((tool) => tool.name)).toEqual(["hindsight_recall"]);
+    expect(catalog.instructions).toContain("只读");
+    expect(mock.transport.mock.calls[0][1].requestInit.headers.Authorization).toBe(
+      `Bearer ${readToken}`
+    );
+  });
+  it.each(["hindsight_save_conclusion", "hindsight_ingest_document"])(
+    "rejects a subagent %s before opening a remote connection",
+    async (name) => {
+      await expect(
+        callRemoteTool(
+          "codex",
+          root,
+          "normal",
+          name,
+          { content: "x", evidence: "y" },
+          undefined,
+          "read-only"
+        )
+      ).rejects.toThrow("memory_readonly");
+      expect(mock.connect).not.toHaveBeenCalled();
+    }
+  );
+  it("never borrows writer credentials for subagent receipt reads", async () => {
+    await callRemoteTool(
+      "codex",
+      root,
+      "normal",
+      "hindsight_sync_status",
+      {},
+      undefined,
+      "read-only"
+    );
+    await callRemoteTool(
+      "codex",
+      root,
+      "normal",
+      "hindsight_recall",
+      { query: "x" },
+      undefined,
+      "read-only"
+    );
+    expect(mock.transport.mock.calls.map((c) => c[1].requestInit.headers.Authorization)).toEqual([
+      `Bearer ${readToken}`,
+      `Bearer ${readToken}`,
+    ]);
+  });
+  it("inherits readonly process policy even when a caller requests read-write", async () => {
+    vi.stubEnv("HINDSIGHT_MEMORY_ACCESS", "read-only");
+    await expect(
+      callRemoteTool(
+        "codex",
+        root,
+        "normal",
+        "hindsight_save_conclusion",
+        { content: "x", evidence: "y" },
+        undefined,
+        "read-write"
+      )
+    ).rejects.toThrow("memory_readonly");
+    await fetchRemoteCatalog("codex", loadConfig({ harness: "codex" }), undefined, "read-write");
+    expect(mock.transport.mock.calls[0][1].requestInit.headers.Authorization).toBe(
+      `Bearer ${readToken}`
     );
   });
   it("fails unmapped projects without network", async () => {

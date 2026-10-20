@@ -27,13 +27,15 @@ import { buildKnowledgeTools, type ToolSpec } from "./core/knowledge-tools";
 import { buildPageTrigger } from "./core/missions";
 import { buildRetainStamp } from "./core/retain-stamp";
 import { callRemoteTool, fetchRemoteCatalog } from "./core/remote-mcp-bridge";
+import { assertMemoryWritable, memoryAccessFor } from "./core/memory-access";
 
 /** A stdio transport only: project identity comes from the signed host hook, never startup cwd. */
 export async function buildRemoteMcpServer(harness: string, cfg: Config): Promise<McpServer> {
   const shutdown = new AbortController();
+  const access = memoryAccessFor();
   const catalog = cfg.disabled
     ? { instructions: "", tools: [] }
-    : await fetchRemoteCatalog(harness, cfg, shutdown.signal);
+    : await fetchRemoteCatalog(harness, cfg, shutdown.signal, access);
   if (catalog.tools.some((tool) => "bank_id" in (tool.inputSchema.properties ?? {})))
     throw new Error("remote_project_catalog_required");
   const tools = catalog.tools.map((tool) => {
@@ -54,7 +56,7 @@ export async function buildRemoteMcpServer(harness: string, cfg: Config): Promis
     };
   });
   const server = new McpServer(
-    { name: "hindsight", version: "0.9.0" },
+    { name: "hindsight", version: "0.9.4" },
     { instructions: catalog.instructions }
   );
   server.server.registerCapabilities({ tools: { listChanged: false } });
@@ -62,6 +64,8 @@ export async function buildRemoteMcpServer(harness: string, cfg: Config): Promis
   server.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const args = request.params.arguments ?? {};
     try {
+      if (["hindsight_save_conclusion", "hindsight_ingest_document"].includes(request.params.name))
+        assertMemoryWritable(access);
       const tool = tools.find((candidate) => candidate.name === request.params.name);
       if (
         !tool ||
@@ -73,15 +77,18 @@ export async function buildRemoteMcpServer(harness: string, cfg: Config): Promis
       if (
         tool.annotations?.readOnlyHint !== true ||
         ["hindsight_save_conclusion", "hindsight_ingest_document"].includes(request.params.name)
-      )
+      ) {
+        assertMemoryWritable(access);
         assertCanWrite(claims.mode);
+      }
       return await callRemoteTool(
         harness,
         claims.cwd,
         claims.mode,
         request.params.name,
         cleanArguments(args),
-        AbortSignal.any([shutdown.signal, extra.signal])
+        AbortSignal.any([shutdown.signal, extra.signal]),
+        access
       );
     } catch (e) {
       return projectErrorResult(e, "trusted_project_context_unavailable");
@@ -105,6 +112,7 @@ export function selectTools(
 ): ToolSpec[] {
   const cwd = opts.cwd ?? process.cwd();
   const harness = opts.harness ?? cfg.harness;
+  const access = memoryAccessFor();
   const tools = cfg.disabled
     ? []
     : buildKnowledgeTools(client, bankId, {
@@ -116,8 +124,24 @@ export function selectTools(
         toolGuideExtra: cfg.toolGuideExtra,
         stampFor: () => buildRetainStamp(cfg, { directory: cwd, harness, bankId }),
       });
-  if (cfg.bankResolution !== "registry") return tools;
-  return tools.map((tool) => ({
+  const allowed = tools
+    .filter((tool) => access === "read-write" || tool.annotations?.readOnlyHint === true)
+    .map((tool) => ({
+      ...tool,
+      handler: async (
+        args: Record<string, unknown>,
+        context?: Parameters<ToolSpec["handler"]>[1]
+      ) => {
+        try {
+          if (tool.annotations?.readOnlyHint !== true) assertMemoryWritable(access);
+        } catch (error) {
+          return projectErrorResult(error);
+        }
+        return tool.handler(args, context);
+      },
+    }));
+  if (cfg.bankResolution !== "registry") return allowed;
+  return allowed.map((tool) => ({
     ...tool,
     inputSchema: {
       ...tool.inputSchema,
@@ -125,6 +149,7 @@ export function selectTools(
     },
     handler: async (args) => {
       try {
+        if (tool.annotations?.readOnlyHint !== true) assertMemoryWritable(access);
         const claims = verifyToolContext(args._context, tool.name, args);
         if (claims.harness !== harness) throw new Error("wrong_harness_context");
         const live = resolveHostMemory(harness, claims.cwd);
@@ -213,7 +238,7 @@ export function resolveProjectCwd(
  * keeps that privacy boundary intact while preventing one optional probe from failing startup.
  */
 export function buildMcpServer(tools: ToolSpec[]): McpServer {
-  const server = new McpServer({ name: "hindsight", version: "0.9.0" });
+  const server = new McpServer({ name: "hindsight", version: "0.9.4" });
   if (tools.length === 0) {
     server.server.registerCapabilities({ tools: { listChanged: false } });
     server.server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }));
@@ -263,7 +288,7 @@ async function main() {
   );
 
   const timer =
-    global.bankResolution === "registry"
+    global.bankResolution === "registry" && memoryAccessFor() !== "read-only"
       ? setInterval(() => {
           void (async () => {
             for (const work of pendingConclusionWorkspaces()) {

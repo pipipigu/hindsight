@@ -1,4 +1,6 @@
+import { memoryAccessFor, READ_ONLY_MEMORY_GUIDANCE } from "./memory-access";
 import { fetchRemoteRules } from "./remote-mcp-bridge";
+import { projectDiagnostic } from "./project-diagnostics";
 import { sharedRecall } from "./shared-recall";
 import {
   MEMORY_SEARCH_GUIDE,
@@ -502,12 +504,21 @@ export async function runHook(
   // session's only record of what the user said, and a slow or unreachable server must not be able
   // to cost the turn. Journaling under `retainSessions: false` writes a temp file nothing reads,
   // which is cheaper than threading that decision through two processes to find out.
-  if (spec.journalPrompt && !cfg.remoteMcpConfigFile) {
+  const readOnly = memoryAccessFor() === "read-only";
+  if (spec.journalPrompt && !cfg.remoteMcpConfigFile && !readOnly) {
     appendJournalTurn(journalPath(spec.harness, sessionId), { role: "user", content: prompt });
   }
 
   const out = (context: string | undefined, notice?: string) =>
-    process.stdout.write(JSON.stringify(spec.emit(context ?? "", notice, ev)));
+    process.stdout.write(
+      JSON.stringify(
+        spec.emit(
+          [context, readOnly ? READ_ONLY_MEMORY_GUIDANCE : ""].filter(Boolean).join("\n"),
+          notice,
+          ev
+        )
+      )
+    );
 
   const sessionRoot = sessionRootDir(spec.harness, sessionId, cwd);
   const derived = deriveBankIdOrSkip(cfg, cwd, spec.harness, sessionRoot);
@@ -523,8 +534,13 @@ export async function runHook(
     try {
       const rules = await fetchRemoteRules(spec.harness, cwd);
       if (rules) out(rules);
-    } catch {
-      out(undefined, "NAS MCP rules unavailable; memory tools have no local fallback.");
+    } catch (error) {
+      const { code, stage } = projectDiagnostic(error, "remote_mcp_connection_failed");
+      diag(spec.harness, "remote_rules_failed", { code, stage });
+      out(
+        undefined,
+        `NAS MCP rules unavailable: ${code} (${stage}); memory tools have no local fallback.`
+      );
     }
     return;
   }
@@ -551,7 +567,7 @@ export async function runHook(
   // ingestion engine. Normally the shared SessionStart lifecycle already did — the engine's
   // per-bank lock makes this a no-op — but a session that predates installation never received
   // SessionStart. This limited fallback heals that case without duplicating any survey logic.
-  if (cfg.autoSeed !== false && !existsSync(cacheFile)) {
+  if (!readOnly && cfg.autoSeed !== false && !existsSync(cacheFile)) {
     startBackgroundSeed(cwd, { limit: cfg.seedLimit, harness: spec.harness });
   }
 
@@ -568,6 +584,7 @@ export async function runHook(
   // predates the install, so no SessionStart and the first-prompt net already passed). Fire the
   // idempotent engine — the per-bank lock makes repeats free while it builds.
   if (
+    !readOnly &&
     cfg.autoSeed !== false &&
     client.knowledgePagesSupported !== false &&
     output.pages.length === 0

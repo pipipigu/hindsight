@@ -286,10 +286,19 @@ describe("explicit memory queries", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
-        throw new Error("offline");
+        throw new Error("offline: /private/path Bearer SECRET");
       })
     );
-    await expect(runDshTool(tool, { query: "question" }, "plan")).rejects.toThrow("offline");
+    const failure = await runDshTool(tool, { query: "question" }, "plan").catch(
+      (error: unknown) => error
+    );
+    expect(failure).toBeInstanceOf(Error);
+    expect(JSON.parse((failure as Error).message)).toEqual({
+      error: "memory_request_failed",
+      code: "memory_request_failed",
+      stage: "request",
+    });
+    expect((failure as Error).message).not.toMatch(/offline|private|Bearer|SECRET/);
   });
 
   it("rejects a malformed API result instead of treating it as an empty bank", async () => {

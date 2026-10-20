@@ -77,7 +77,11 @@ export default defineConfig({
   removeNodeProtocol: false,
   clean: true,
   dts: { entry: "src/index.ts" },
-  shims: false,
+  // Bundled Undici uses CommonJS requires for Node built-ins inside standalone ESM bins.
+  shims: true,
+  banner: {
+    js: 'import { createRequire as createHindsightRequire } from "node:module";\nconst require = createHindsightRequire(import.meta.url);',
+  },
   // Each bin entry (claude-hook.js, cursor-hook.js, codex-hook.js, deepen.js, status.js, mcp-server.js,
   // hindsight-seed.js) must be a single self-contained file: hosts wire a hook by absolute path to
   // ONE dist file and never load the rest of the package, so shared code can't live in a separate
@@ -101,5 +105,7 @@ export default defineConfig({
     /^smol-toml/,
     // Explicit query budgets must also work from single-file hook/MCP installations.
     /^js-tiktoken/,
+    // Private NAS routing uses a per-call dispatcher in single-file installations too.
+    /^undici/,
   ],
 });

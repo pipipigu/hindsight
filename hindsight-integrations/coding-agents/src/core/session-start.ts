@@ -1,4 +1,6 @@
+import { memoryAccessFor, READ_ONLY_MEMORY_GUIDANCE } from "./memory-access";
 import { fetchRemoteRules } from "./remote-mcp-bridge";
+import { projectDiagnostic } from "./project-diagnostics";
 import { permissionMode } from "./tool-context";
 import { buildMemoryQueryGuide } from "./recall-guidance";
 import { buildPageTrigger } from "./missions";
@@ -219,7 +221,8 @@ export async function buildSessionStartContext(args: {
   // The knowledge preamble is model context and stays in `additionalContext`.
   let systemMessage: string | undefined;
 
-  if (cfg.autoSeed !== false) {
+  // A hook process can inherit the same read-only authority as a persistent-plugin child.
+  if (memoryAccessFor() !== "read-only" && cfg.autoSeed !== false) {
     if (hasGit(cwd)) {
       // The LIVE bank is the ONLY state (cold-check-wins): delete the bank and the next session is
       // a true first-open — no client-side flags can contradict it. Opting out of memory is the
@@ -368,7 +371,14 @@ export async function buildSessionStartContext(args: {
     ms: Date.now() - t0,
   });
 
-  return { systemMessage, additionalContext, deferInitialReflect };
+  return {
+    systemMessage,
+    additionalContext:
+      memoryAccessFor() === "read-only"
+        ? [additionalContext, READ_ONLY_MEMORY_GUIDANCE].filter(Boolean).join("\n")
+        : additionalContext,
+    deferInitialReflect,
+  };
 }
 
 /** Run one SessionStart hook invocation: stdin event in, (maybe) an additionalContext object on stdout. */
@@ -401,12 +411,26 @@ export async function runSessionStartHook(
       if (cfg.disabled) return;
       try {
         const rules = await fetchRemoteRules(harness, cwd);
-        if (rules) process.stdout.write(JSON.stringify(spec.emit({ additionalContext: rules })));
-      } catch {
+        if (rules)
+          process.stdout.write(
+            JSON.stringify(
+              spec.emit({
+                additionalContext: [
+                  rules,
+                  memoryAccessFor() === "read-only" ? READ_ONLY_MEMORY_GUIDANCE : "",
+                ]
+                  .filter(Boolean)
+                  .join("\n"),
+              })
+            )
+          );
+      } catch (error) {
+        const { code, stage } = projectDiagnostic(error, "remote_mcp_connection_failed");
+        diag(harness, "remote_rules_failed", { code, stage });
         process.stdout.write(
           JSON.stringify(
             spec.emit({
-              systemMessage: "NAS MCP rules unavailable; memory tools have no local fallback.",
+              systemMessage: `NAS MCP rules unavailable: ${code} (${stage}); memory tools have no local fallback.`,
             })
           )
         );
@@ -455,6 +479,7 @@ export async function runSessionStartHook(
     });
 
     if (
+      memoryAccessFor() !== "read-only" &&
       cfg.bankResolution === "registry" &&
       permissionMode(ev.permission_mode) === "normal" &&
       client instanceof HindsightClient

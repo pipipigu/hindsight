@@ -35,10 +35,16 @@ import { buildSessionStartContext } from "./session-start";
 import { syncCompanionSkill } from "./skill-sync";
 import { buildHookOutput } from "./hook";
 import { sessionCacheFile, writeSessionCache } from "./session-cache";
+import { assertMemoryWritable, memoryAccessFor, type MemoryAccess } from "./memory-access";
 
 const HARNESS = "opencode";
 
 export class RuntimeCore {
+  // The per-instance mode separates same-process child-agent cores; the env check also protects
+  // standalone child processes and prevents a later environment downgrade from leaving writes open.
+  private get memoryReadOnly(): boolean {
+    return this.memoryAccess === "read-only" || memoryAccessFor() === "read-only";
+  }
   private shutdown = new AbortController();
   private refreshMappedMemory(): boolean {
     if (this.cfg.bankResolution !== "registry") return !this.cfg.disabled;
@@ -62,7 +68,11 @@ export class RuntimeCore {
   private deliveryTimer?: ReturnType<typeof setInterval>;
   /** Resume previously authorized saves without requiring another model turn. */
   async resumeConclusions(): Promise<void> {
-    if (this.refreshMappedMemory() && this.cfg.bankResolution === "registry")
+    if (
+      !this.memoryReadOnly &&
+      this.refreshMappedMemory() &&
+      this.cfg.bankResolution === "registry"
+    )
       await retryConclusions(this.client);
   }
   dispose(): void {
@@ -73,6 +83,7 @@ export class RuntimeCore {
   private sharedPagesReady = false;
   async prepareSharedPages(mode: PermissionMode): Promise<void> {
     if (
+      this.memoryReadOnly ||
       !this.refreshMappedMemory() ||
       this.cfg.bankResolution !== "registry" ||
       mode !== "normal" ||
@@ -112,11 +123,12 @@ export class RuntimeCore {
     readonly harness: string = HARNESS,
     /** Workspace root this host opened — the SAME directory bank resolution used, so a
      *  `{gitProject}` in retainTags names the repo the bank was derived from. */
-    private readonly projectDir: string = process.cwd()
+    private readonly projectDir: string = process.cwd(),
+    private readonly memoryAccess: MemoryAccess = memoryAccessFor()
   ) {
     if (cfg.bankResolution === "registry") this.client.bindCancellation(this.shutdown.signal);
     setLogLevel(cfg.logLevel);
-    if (cfg.bankResolution === "registry") {
+    if (cfg.bankResolution === "registry" && !this.memoryReadOnly) {
       this.deliveryTimer = setInterval(() => {
         void this.resumeConclusions().catch(() => {});
       }, 30000);
@@ -140,7 +152,7 @@ export class RuntimeCore {
   /** The hindsight_* knowledge + recall tools, bound to this bank, for the harness to register natively. */
   toolSpecs(): ToolSpec[] {
     if (!this.refreshMappedMemory()) return [];
-    return buildKnowledgeTools(this.client, this.bankId, {
+    const tools = buildKnowledgeTools(this.client, this.bankId, {
       repoDir: this.projectDir,
       harness: this.harness,
       pageTrigger: buildPageTrigger(this.cfg),
@@ -154,10 +166,25 @@ export class RuntimeCore {
           bankId: this.bankId,
         }),
     });
+    return tools
+      .filter((tool) => !this.memoryReadOnly || tool.annotations.readOnlyHint)
+      .map((tool) => ({
+        ...tool,
+        handler: async (args, context) => {
+          if (!tool.annotations.readOnlyHint) {
+            try {
+              assertMemoryWritable(this.memoryAccess);
+            } catch (error) {
+              return { isError: true, content: [{ type: "text" as const, text: String(error) }] };
+            }
+          }
+          return tool.handler(args, context);
+        },
+      }));
   }
 
   get writeBackEnabled(): boolean {
-    return this.cfg.retainSessions;
+    return !this.memoryReadOnly && this.cfg.retainSessions;
   }
 
   /**
@@ -170,6 +197,7 @@ export class RuntimeCore {
    * the first — `onPrompt` builds its own from the session's live page list (#4607).
    */
   async seedIfCold(repoPath: string | undefined): Promise<void> {
+    if (this.memoryReadOnly) return;
     // Anti-recursion: a headless survey session runs the agent (which loads this plugin) with
     // HINDSIGHT_DISABLE_HOOKS=1 — the tools stay registered (toolSpecs, so the survey can ingest),
     // but seeding/recall/write-back must no-op or the survey would re-seed itself (see core/survey.ts).
@@ -224,7 +252,8 @@ export class RuntimeCore {
       this.lastInjection = "";
       return;
     }
-    if (this.cfg.bankResolution === "registry") void retryConclusions(this.client).catch(() => {});
+    if (!this.memoryReadOnly && this.cfg.bankResolution === "registry")
+      void retryConclusions(this.client).catch(() => {});
     if (process.env.HINDSIGHT_DISABLE_HOOKS) return; // anti-recursion (see seedIfCold)
     if (!sessionId || !prompt.trim()) return;
     const turns = (this.turnCount.get(sessionId) ?? 0) + 1;
@@ -381,6 +410,8 @@ export class RuntimeCore {
     startTs: string,
     trigger = "turn"
   ): void {
+    if (this.memoryReadOnly) return;
+    assertMemoryWritable(this.memoryAccess);
     const t0 = Date.now();
     // Daemon mode: the write path is the last chance to get a daemon up — the Stop-hook role, for
     // hosts that have no Stop hook. A daemon that died mid-session would otherwise take the whole

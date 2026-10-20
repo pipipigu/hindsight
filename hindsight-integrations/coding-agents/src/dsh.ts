@@ -35,6 +35,12 @@ import { log } from "./core/log";
 import { RuntimeCore } from "./core/runtime";
 import { fetchRemoteCatalog, fetchRemoteRules, callRemoteTool } from "./core/remote-mcp-bridge";
 import { HINDSIGHT_PLUGIN, readDshEvents, type DshSessionEvent } from "./core/transcript-dsh";
+import {
+  assertMemoryWritable,
+  memoryAccessFor,
+  READ_ONLY_MEMORY_GUIDANCE,
+  type MemoryAccess,
+} from "./core/memory-access";
 
 const HARNESS = "dsh";
 
@@ -105,18 +111,114 @@ interface DshContext {
     event: "agent/disposed",
     listener: (payload: { agent: DshAgent }) => void
   ): (() => void) | void;
+  on(event: "tools/change", listener: () => void): (() => void) | void;
   inject(
     names: string[],
     callback: (ctx: DshToolContext) => void | Promise<void>
   ): void | PromiseLike<unknown>;
 }
 
-interface DshToolContext {
+interface DshToolContext extends Pick<DshContext, "on" | "effect"> {
   tools: {
     register(definition: unknown): void;
+    guard?(
+      guard: (execution: { name: string; agent?: DshAgent }) => string | undefined
+    ): () => void;
     /** Registry introspection; used only to log what the host ended up exposing. */
     schemas?(): { name: string }[];
   };
+}
+
+interface DshScopedTools {
+  restrict?(filter: { deny: string[] }): () => void;
+  schemas?(scope?: DshAgent): { name: string }[];
+}
+
+/** Hide writes per caller without narrowing the shared host catalog for human sessions. */
+function bindDshMemoryPermissions(
+  toolCtx: DshToolContext,
+  catalog: readonly { name: string; annotations?: { readOnlyHint?: boolean } }[]
+): void {
+  // Derive from the registered catalog so new writes and unannotated tools fail closed too.
+  const writes = new Set(
+    catalog.filter((tool) => tool.annotations?.readOnlyHint !== true).map((tool) => tool.name)
+  );
+  const restrictions = new Map<
+    DshAgent,
+    { masked: Set<string>; disposers: (() => void)[]; installing: boolean }
+  >();
+  let disposing = false;
+  const disposeGuard = toolCtx.tools.guard?.((execution) =>
+    writes.has(execution.name) &&
+    memoryAccessFor(execution.agent?.session.header.origin) === "read-only"
+      ? "memory_readonly"
+      : undefined
+  );
+  function restrict(agent: DshAgent): void {
+    if (disposing || memoryAccessFor(agent.session.header.origin) !== "read-only") return;
+    const tools = agent.ctx?.get?.("tools") as DshScopedTools | undefined;
+    if (!tools?.restrict || !tools.schemas) return;
+    let state = restrictions.get(agent);
+    if (!state) {
+      state = { masked: new Set(), disposers: [], installing: false };
+      restrictions.set(agent, state);
+    }
+    if (state.installing) return;
+    // The host rejects unknown deny names; a read-only remote identity may already omit writes.
+    const deny = tools
+      .schemas(agent)
+      .map((tool) => tool.name)
+      .filter((name) => writes.has(name) && !state.masked.has(name));
+    if (!deny.length) return;
+    // restrict emits tools/change synchronously: publish the in-progress mask before calling it.
+    state.installing = true;
+    for (const name of deny) state.masked.add(name);
+    try {
+      state.disposers.push(tools.restrict({ deny }));
+    } catch (error) {
+      for (const name of deny) state.masked.delete(name);
+      throw error;
+    } finally {
+      state.installing = false;
+    }
+  }
+  const listeners = [toolCtx.on("agent/session-start", ({ agent }) => restrict(agent))];
+  listeners.push(
+    toolCtx.on("tools/change", () => {
+      for (const agent of restrictions.keys()) restrict(agent);
+    })
+  );
+  listeners.push(
+    toolCtx.on(
+      "agent/pre-step",
+      async ({ agent }, next) => {
+        // Also covers restored sessions and agents that predate plugin hot reload.
+        restrict(agent);
+        return next();
+      },
+      { prepend: true }
+    )
+  );
+  listeners.push(
+    toolCtx.on("agent/disposed", ({ agent }) => {
+      const state = restrictions.get(agent);
+      restrictions.delete(agent);
+      for (const dispose of state?.disposers ?? []) dispose();
+    })
+  );
+  toolCtx.effect?.(
+    () => () => {
+      disposing = true;
+      const states = [...restrictions.values()];
+      restrictions.clear();
+      for (const dispose of listeners) dispose?.();
+      disposeGuard?.();
+      for (const state of states) {
+        for (const dispose of state.disposers) dispose();
+      }
+    },
+    "hindsight.memory-permissions"
+  );
 }
 
 /** `exec` as a dsh tool body receives it (only the caller matters to us). */
@@ -170,7 +272,10 @@ function workspaceRoot(agent: DshAgent): string {
  * session actually opens, so merely registering the tools never seeds the launch directory.
  */
 let registryRevision = "";
-function workspaceFor(root: string): Workspace | undefined {
+function workspaceFor(
+  root: string,
+  access: MemoryAccess = memoryAccessFor()
+): Workspace | undefined {
   const cfg0 = loadHostConfig(HARNESS);
   if (cfg0.bankResolution === "registry") {
     try {
@@ -186,20 +291,23 @@ function workspaceFor(root: string): Workspace | undefined {
       return undefined;
     }
   }
-  const cached = workspaces.get(root);
+  // A read-only worker may share a directory with its parent, but must not start that parent's
+  // pending-save delivery or page maintenance when its first query creates a runtime.
+  const cacheKey = JSON.stringify([root, access]);
+  const cached = workspaces.get(cacheKey);
   if (cached !== undefined) return cached ?? undefined;
 
   // One shared builder for every long-lived host (core/host-client.ts): the global switch, the
   // per-bank opt-out and `optInOnly` all land in `cfg.disabled`.
   const { cfg, bankId, client } = resolveHostMemory(HARNESS, root);
   if (cfg.disabled) {
-    workspaces.set(root, null); // inert: same agent, no memory (baseline parity)
+    workspaces.set(cacheKey, null); // inert: same agent, no memory (baseline parity)
     return undefined;
   }
   // The 5th argument is this host's whole reason for existing here: RuntimeCore binds the
   // knowledge tools (and retain stamps) to the workspace it is given, and dsh's process cwd is the
   // launch directory, routinely a different repository from the session's.
-  const core = new RuntimeCore(client, bankId, cfg, HARNESS, root);
+  const core = new RuntimeCore(client, bankId, cfg, HARNESS, root, access);
   // The write-back path reads the log back off the live agent — dsh keeps the whole session in
   // memory, so unlike opencode there is nothing to refetch over HTTP.
   core.setTranscriptSource(async (sessionId) => {
@@ -208,7 +316,7 @@ function workspaceFor(root: string): Workspace | undefined {
     return agent ? readDshEvents(dshSessionEvents(agent.session)) : [];
   });
   const workspace: Workspace = { core, root };
-  workspaces.set(root, workspace);
+  workspaces.set(cacheKey, workspace);
   return workspace;
 }
 
@@ -223,14 +331,14 @@ function ensureSeeded(workspace: Workspace): void {
   workspace.seeded ??= workspace.core.seedIfCold(workspace.root);
 }
 
-function workspaceForAgent(agent: DshAgent): Workspace | undefined {
+function workspaceForAgent(agent: DshAgent, allowSubagentQueries = false): Workspace | undefined {
   if (loadHostConfig(HARNESS).bankResolution === "registry" && !agent.session.header.cwd)
     return undefined;
   // A subagent session is a child of a conversation we already track: injecting into it would pay
   // for a second recall per delegation, and retaining it would file a fragment of a session that
   // the parent already stores in full.
-  if (agent.session.header.origin === "subagent") return undefined;
-  return workspaceFor(workspaceRoot(agent));
+  if (agent.session.header.origin === "subagent" && !allowSubagentQueries) return undefined;
+  return workspaceFor(workspaceRoot(agent), memoryAccessFor(agent.session.header.origin));
 }
 
 // ── message helpers ─────────────────────────────────────────────────────────────
@@ -368,8 +476,10 @@ export function toDshParameters(spec: ToolSpec): Record<string, unknown> {
 export async function runDshTool(
   spec: ToolSpec,
   args: Record<string, unknown>,
-  permission: PermissionMode
+  permission: PermissionMode,
+  access: MemoryAccess = memoryAccessFor()
 ): Promise<string> {
+  if (spec.annotations?.readOnlyHint !== true) assertMemoryWritable(access);
   const result = await spec.handler(args, { permission });
   const text = (result.content || []).map((block) => block.text).join("\n");
   // dsh normalizes a thrown tool body into an isError result with this message, which is exactly
@@ -389,14 +499,14 @@ function registerTools(
   toolCtx: DshToolContext,
   fallbackRoot: string,
   modeFor: (agent?: DshAgent) => PermissionMode
-): void {
+): ToolSpec[] {
   // The registry is populated at plugin load, before any session exists, so the NAMES and schemas
   // come from the launch directory's workspace and each call rebinds to its own caller's bank. The
   // one consequence: if memory is off for the launch directory specifically (a `banks.<id>`
   // opt-out) the tools are absent even for other repositories this process later serves.
   const template = workspaceFor(fallbackRoot);
   const cfg = loadHostConfig(HARNESS);
-  if (!template && (cfg.disabled || cfg.bankResolution !== "registry")) return;
+  if (!template && (cfg.disabled || cfg.bankResolution !== "registry")) return [];
   const catalog = template
     ? specsOf(template)
     : buildKnowledgeTools(resolveCatalogMemory(HARNESS, fallbackRoot).client, "", {
@@ -412,16 +522,24 @@ function registerTools(
         render: (_args: unknown, value: string) => [{ type: "text", text: value }],
       },
       async execute(args: Record<string, unknown>, exec: DshToolRunContext): Promise<string> {
+        // Reject before resolving the bank or parsing connection configuration.
+        if (spec.annotations?.readOnlyHint !== true)
+          assertMemoryWritable(memoryAccessFor(exec?.agent?.session.header.origin));
         // Bind to the caller's repository, not to whichever workspace happened to load first.
         const workspace = exec?.agent
-          ? workspaceForAgent(exec.agent)
+          ? workspaceForAgent(exec.agent, true)
           : cfg.bankResolution === "registry"
             ? undefined
             : template;
         if (!workspace) return "Hindsight memory is disabled for this workspace.";
         const bound = workspace.core.toolSpecs().find((candidate) => candidate.name === spec.name);
         if (!bound) return `Hindsight tool ${spec.name} is unavailable.`;
-        return runDshTool(bound, args, modeFor(exec?.agent));
+        return runDshTool(
+          bound,
+          args,
+          modeFor(exec?.agent),
+          memoryAccessFor(exec?.agent?.session.header.origin)
+        );
       },
     });
   }
@@ -433,6 +551,7 @@ function registerTools(
     hostCatalog: exposed.length,
     hindsight: exposed.filter((schema) => schema.name?.startsWith("hindsight_")).length,
   });
+  return catalog;
 }
 
 /** The tool specs for one workspace, built once (each closes over that bank's client and root). */
@@ -493,7 +612,8 @@ export async function applyRemoteDsh(ctx: DshContext): Promise<void> {
       const combined = AbortSignal.any([signal, lifetime.signal, sessionSignal(agent)]);
       let rules: string | null;
       try {
-        rules = await fetchRemoteRules(HARNESS, cwd, combined);
+        // Per-turn discovery must not consume the longer startup/hook connection budget.
+        rules = await fetchRemoteRules(HARNESS, cwd, combined, 2500);
       } catch {
         if (combined.aborted) return decision;
         rules = "Hindsight NAS MCP 连接不可用；本轮未获取公共记忆规则。";
@@ -505,7 +625,11 @@ export async function applyRemoteDsh(ctx: DshContext): Promise<void> {
         messages: [
           ...decision.messages,
           injectionMessage(
-            `${rules}\n当前宿主：DSH；权限状态：${dshPermissionMode(agent)}。项目由本会话工作目录绑定，模型不得覆盖库或权限。`
+            `${rules}\n当前宿主：DSH；权限状态：${dshPermissionMode(agent)}。项目由本会话工作目录绑定，模型不得覆盖库或权限。${
+              memoryAccessFor(agent.session.header.origin) === "read-only"
+                ? "\n" + READ_ONLY_MEMORY_GUIDANCE
+                : ""
+            }`
           ),
         ],
       };
@@ -531,6 +655,8 @@ export async function applyRemoteDsh(ctx: DshContext): Promise<void> {
           const agent = exec?.agent;
           const cwd = agent?.session.header.cwd;
           if (!agent || !cwd) throw new Error("remote_project_context_missing");
+          const access = memoryAccessFor(agent.session.header.origin);
+          if (spec.annotations?.readOnlyHint !== true) assertMemoryWritable(access);
           const signal = AbortSignal.any([
             lifetime.signal,
             sessionSignal(agent),
@@ -542,7 +668,8 @@ export async function applyRemoteDsh(ctx: DshContext): Promise<void> {
             dshPermissionMode(agent),
             spec.name,
             args,
-            signal
+            signal,
+            access
           );
           const text = result.content
             .filter((block) => block.type === "text")
@@ -553,6 +680,7 @@ export async function applyRemoteDsh(ctx: DshContext): Promise<void> {
         },
       });
     }
+    bindDshMemoryPermissions(toolCtx, catalog.tools);
   });
 }
 
@@ -620,7 +748,7 @@ export function apply(ctx: DshContext): void | Promise<void> {
     "hindsight.shared-delivery"
   );
   const cfg = loadHostConfig(HARNESS);
-  if (!cfg.disabled && cfg.bankResolution === "registry") {
+  if (!cfg.disabled && cfg.bankResolution === "registry" && memoryAccessFor() !== "read-only") {
     try {
       for (const pending of pendingConclusionWorkspaces()) {
         if (pending.harness !== HARNESS) continue;
@@ -641,7 +769,8 @@ export function apply(ctx: DshContext): void | Promise<void> {
   // The tools registry is optional: a composition without it (a bare headless assembly) still gets
   // recall, injection and write-back.
   ctx.inject(["tools"], (toolCtx) => {
-    registerTools(toolCtx, process.cwd(), dshPermissionMode);
+    const catalog = registerTools(toolCtx, process.cwd(), dshPermissionMode);
+    bindDshMemoryPermissions(toolCtx, catalog);
   });
 }
 

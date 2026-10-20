@@ -1,3 +1,4 @@
+import { memoryAccessFor } from "./memory-access";
 /**
  * Shared runtime for the Claude Code `Stop` hook: when a session ends, read its transcript,
  * normalize it, and write it back into the bank so the session compounds into memory. The retain
@@ -182,7 +183,7 @@ export async function runRetainHook(
 ): Promise<void> {
   // Anti-recursion: the codebase survey's own headless claude session (core/survey.ts) sets this
   // so its hooks are a no-op — it must not retain its own survey session's transcript.
-  if (process.env.HINDSIGHT_DISABLE_HOOKS) return;
+  if (process.env.HINDSIGHT_DISABLE_HOOKS || memoryAccessFor() === "read-only") return;
   // The host started counting when it spawned us, which is near enough to now: everything above
   // is synchronous. A margin keeps the kill from landing between our last wait and its response.
   const hostDeadline = Date.now() + spec.hostTimeoutSec * 1000 - HOST_DEADLINE_MARGIN_MS;

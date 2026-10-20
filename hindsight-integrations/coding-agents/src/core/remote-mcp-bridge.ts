@@ -8,14 +8,35 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
+import { isIPv4 } from "node:net";
+import { Agent, buildConnector } from "undici";
 import { z } from "zod";
 import { applyBankConfig, loadConfig, type Config } from "./config";
 import { readRegistry, resolveRegisteredProject } from "./project-registry";
 import type { PermissionMode } from "./tool-context";
+import {
+  assertMemoryWritable,
+  memoryAccessFor,
+  READ_ONLY_MEMORY_GUIDANCE,
+  type MemoryAccess,
+} from "./memory-access";
+
+function isPrivateConnectAddress(address: string): boolean {
+  if (!isIPv4(address)) return false;
+  const [first, second] = address.split(".").map(Number);
+  return (
+    first === 10 ||
+    first === 127 ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168) ||
+    (first === 100 && second >= 64 && second <= 127)
+  );
+}
 
 const privateSchema = z
   .object({
     endpoint: z.string().url(),
+    connectAddress: z.string().refine(isPrivateConnectAddress).optional(),
     projects: z.record(
       z.string(),
       z.record(
@@ -52,11 +73,14 @@ const forbidden = new Set([
   "permission_mode",
   "mode",
   "endpoint",
+  "connectAddress",
   "apiUrl",
   "token",
   "apiToken",
   "_context",
   "harness",
+  "memory_access",
+  "memoryAccess",
 ]);
 function privateConfig(cfg: Config) {
   try {
@@ -77,6 +101,7 @@ function privateConfig(cfg: Config) {
       url.password ||
       url.search ||
       url.hash ||
+      (value.connectAddress !== undefined && url.protocol !== "https:") ||
       (url.protocol !== "https:" &&
         !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)))
     )
@@ -107,6 +132,7 @@ function binding(harness: string, cwd: string, write: boolean, receiptStatus = f
     bankId: project.bankId,
     token,
     endpoint: remote.endpoint,
+    connectAddress: remote.connectAddress,
     identity: [
       cfg.remoteMcpConfigFile,
       cfg.projectRegistryFile,
@@ -118,7 +144,7 @@ function binding(harness: string, cwd: string, write: boolean, receiptStatus = f
   };
 }
 async function connected<T>(
-  initial: { bankId: string; token: string; endpoint: string },
+  initial: { bankId: string; token: string; endpoint: string; connectAddress?: string },
   harness: string,
   verify: () => void,
   run: (client: Client, signal: AbortSignal) => Promise<T>,
@@ -139,25 +165,53 @@ async function connected<T>(
     }
   }, 500);
   const client = new Client({ name: "hindsight-workspace-bridge", version: "1.0.0" });
-  const transport = new StreamableHTTPClientTransport(new URL(initial.endpoint), {
-    requestInit: {
-      headers: {
-        Authorization: `Bearer ${initial.token}`,
-        "X-Hindsight-Project-Bank": Buffer.from(initial.bankId).toString("base64url"),
-        "X-Hindsight-Harness": harness,
-        ...(catalogOnly ? { "X-Hindsight-Catalog": "1" } : {}),
-      },
-      signal: controller.signal,
-    },
-    fetch: (url, init) => fetch(url, { ...init, signal: controller.signal, redirect: "error" }),
-    reconnectionOptions: {
-      maxRetries: 0,
-      initialReconnectionDelay: 1000,
-      maxReconnectionDelay: 1000,
-      reconnectionDelayGrowFactor: 1,
-    },
-  });
+  let dispatcher: Agent | undefined;
   try {
+    const endpoint = new URL(initial.endpoint);
+    const connectAddress = initial.connectAddress;
+    if (connectAddress !== undefined) {
+      const connect = buildConnector({});
+      dispatcher = new Agent({
+        connect(options, callback) {
+          if (options.hostname !== endpoint.hostname || options.protocol !== "https:") {
+            callback(new Error("remote_mcp_connect_origin_invalid"), null);
+            return;
+          }
+          // Change only the socket destination; preserve URL/Host and certificate SNI.
+          // This dispatcher is private to this call, so unrelated requests retain normal routing.
+          connect(
+            { ...options, hostname: connectAddress, servername: endpoint.hostname },
+            callback
+          );
+        },
+      });
+    }
+    const transport = new StreamableHTTPClientTransport(endpoint, {
+      requestInit: {
+        headers: {
+          Authorization: `Bearer ${initial.token}`,
+          "X-Hindsight-Project-Bank": Buffer.from(initial.bankId).toString("base64url"),
+          "X-Hindsight-Harness": harness,
+          ...(catalogOnly ? { "X-Hindsight-Catalog": "1" } : {}),
+        },
+        signal: controller.signal,
+      },
+      fetch: (url, init) => {
+        const request: RequestInit & { dispatcher?: Agent } = {
+          ...init,
+          signal: controller.signal,
+          redirect: "error",
+          ...(dispatcher ? { dispatcher } : {}),
+        };
+        return fetch(url, request);
+      },
+      reconnectionOptions: {
+        maxRetries: 0,
+        initialReconnectionDelay: 1000,
+        maxReconnectionDelay: 1000,
+        reconnectionDelayGrowFactor: 1,
+      },
+    });
     verify();
     await client.connect(transport, { signal: controller.signal, timeout: budget });
     verify();
@@ -166,17 +220,26 @@ async function connected<T>(
     verify();
     if (controller.signal.aborted) throw controller.signal.reason;
     return result;
+  } catch (error) {
+    // The SDK may wrap an aborted fetch; retain our fixed timeout/cancellation code.
+    if (controller.signal.aborted) throw controller.signal.reason;
+    throw error;
   } finally {
     clearTimeout(timer);
     clearInterval(watcher);
     signal?.removeEventListener("abort", abort);
+    // This connection belongs to one call; stop any background SSE fetch before closing it.
+    controller.abort(new Error("remote_mcp_closed"));
     await client.close().catch(() => {});
+    await dispatcher?.destroy().catch(() => {});
   }
 }
 export async function fetchRemoteRules(
   harness: string,
   cwd: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  // Proxy + private DNS + TLS can exceed 2.5s during startup; callers on the turn path opt down.
+  timeoutMs = 15000
 ): Promise<string | null> {
   let initial;
   try {
@@ -198,13 +261,14 @@ export async function fetchRemoteRules(
     },
     async (client) => client.getInstructions() ?? "",
     signal,
-    2500
+    timeoutMs
   );
 }
 export async function fetchRemoteCatalog(
   harness: string,
   cfg: Config,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  access: MemoryAccess = memoryAccessFor()
 ): Promise<{ instructions: string; tools: Tool[]; bankId: string }> {
   const remote = privateConfig(cfg);
   const project = readRegistry(cfg.projectRegistryFile).projects.find(
@@ -212,7 +276,8 @@ export async function fetchRemoteCatalog(
   );
   if (!project) throw new Error("remote_project_unregistered");
   // Discover with the write identity when available, but only initialize/listTools; never call tools.
-  const write = Boolean(remote.projects[harness][project.bankId].writeToken);
+  const readonly = access === "read-only" || memoryAccessFor() === "read-only";
+  const write = !readonly && Boolean(remote.projects[harness][project.bankId].writeToken);
   const initial = binding(harness, project.root, write);
   return connected(
     initial,
@@ -245,7 +310,13 @@ export async function fetchRemoteCatalog(
         )
       )
         throw new Error("remote_catalog_invalid");
-      return { instructions: client.getInstructions() ?? "", tools, bankId: initial.bankId };
+      return {
+        instructions: [client.getInstructions(), readonly ? READ_ONLY_MEMORY_GUIDANCE : ""]
+          .filter(Boolean)
+          .join("\n"),
+        tools: readonly ? tools.filter((tool) => readNames.has(tool.name)) : tools,
+        bankId: initial.bankId,
+      };
     },
     signal,
     10000,
@@ -258,14 +329,18 @@ export async function callRemoteTool(
   mode: PermissionMode,
   name: string,
   args: Record<string, unknown>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  access: MemoryAccess = memoryAccessFor()
 ): Promise<CallToolResult> {
   if (Object.keys(args).some((key) => forbidden.has(key)))
     throw new Error("remote_tool_context_override");
   const writeOperation = writeNames.has(name);
   if (!writeOperation && !readNames.has(name)) throw new Error("remote_tool_unavailable");
+  if (writeOperation) assertMemoryWritable(access);
   if (writeOperation && mode !== "normal") throw new Error("remote_write_permission_denied");
-  const receiptStatus = name === "hindsight_sync_status";
+  // Subagents must never borrow the writer identity, even to inspect another identity's receipt.
+  const receiptStatus =
+    name === "hindsight_sync_status" && access !== "read-only" && memoryAccessFor() !== "read-only";
   const initial = binding(harness, cwd, writeOperation, receiptStatus);
   return connected(
     initial,

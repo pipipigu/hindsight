@@ -55,6 +55,9 @@ const DEFAULT_BANK_NAME = "coding";
 // split memory per agent, defeating cross-agent sharing).
 const DEFAULT_TEMPLATE = "coding-agent::{gitProject}";
 
+/** Registry outcomes that mean "not mapped on purpose" rather than a resolution fault. */
+const EXPECTED_REGISTRY_SKIPS = new Set(["project_unregistered", "project_disabled"]);
+
 /**
  * The repository a directory belongs to — or WHY there is no answer.
  *
@@ -399,14 +402,18 @@ export function deriveBankIdOrSkip(
   } catch (error) {
     if (!(error instanceof BankResolutionError) && config.bankResolution !== "registry")
       throw error;
+    const reason = error instanceof Error ? error.message : "bank_resolution_failed";
+    // Registry mode: an unregistered or disabled directory is the user's choice, not a fault —
+    // logging it on every prompt buried real diagnostics (home dir, scratch dirs).
+    if (config.bankResolution === "registry" && EXPECTED_REGISTRY_SKIPS.has(reason)) {
+      log.debug(harness, "bank unresolved: directory not mapped", { directory, error: reason });
+      return null;
+    }
     log.warn(harness, "bank unresolved: skipping (repository could not be identified)", {
       directory,
-      error: error instanceof Error ? error.message : "bank_resolution_failed",
+      error: reason,
     });
-    diag(harness, "bank_unresolved", {
-      directory,
-      error: error instanceof Error ? error.message : "bank_resolution_failed",
-    });
+    diag(harness, "bank_unresolved", { directory, error: reason });
     return null;
   }
 }

@@ -19,6 +19,7 @@ let dir: string;
 let originalKey: string | undefined;
 const clients: Client[] = [];
 beforeEach(() => {
+  vi.stubEnv("HINDSIGHT_MEMORY_ACCESS", "");
   dir = mkdtempSync(join(tmpdir(), "remote-stdio-"));
   originalKey = process.env.HINDSIGHT_CONTEXT_KEY_FILE;
   process.env.HINDSIGHT_CONTEXT_KEY_FILE = join(dir, "context.key");
@@ -44,6 +45,7 @@ afterEach(async () => {
   await Promise.all(clients.splice(0).map((client) => client.close()));
   if (originalKey === undefined) delete process.env.HINDSIGHT_CONTEXT_KEY_FILE;
   else process.env.HINDSIGHT_CONTEXT_KEY_FILE = originalKey;
+  vi.unstubAllEnvs();
   rmSync(dir, { recursive: true, force: true });
 });
 async function connect(disabled = false) {
@@ -83,6 +85,29 @@ describe("NAS stdio adapter", () => {
     expect(tools[0].inputSchema.properties).not.toHaveProperty("bank_id");
     expect(tools[0].inputSchema.properties).toHaveProperty("_context");
   });
+  it.each(["read-only", "unexpected"])(
+    "passes read-only authority to catalog and calls for process access %s",
+    async (access) => {
+      vi.stubEnv("HINDSIGHT_MEMORY_ACCESS", access);
+      const { client } = await connect();
+      expect(bridge.catalog).toHaveBeenCalledWith(
+        "codex",
+        expect.any(Object),
+        expect.any(AbortSignal),
+        "read-only"
+      );
+      await client.callTool({ name: recall, arguments: signed({ query: "child facts" }) });
+      expect(bridge.call).toHaveBeenCalledWith(
+        "codex",
+        "/real/project",
+        "normal",
+        recall,
+        { query: "child facts" },
+        expect.any(AbortSignal),
+        "read-only"
+      );
+    }
+  );
   it("rejects a library catalog instead of exposing arbitrary bank selection", async () => {
     bridge.catalog.mockResolvedValue({
       instructions: "NAS",
@@ -143,7 +168,8 @@ describe("NAS stdio adapter", () => {
         "normal",
         recall,
         { query: "project facts" },
-        expect.any(AbortSignal)
+        expect.any(AbortSignal),
+        "read-write"
       );
     } finally {
       cwd.mockRestore();
@@ -183,7 +209,8 @@ describe("NAS stdio adapter", () => {
         mode,
         recall,
         { query: "facts" },
-        expect.any(AbortSignal)
+        expect.any(AbortSignal),
+        "read-write"
       );
     }
   });
@@ -286,7 +313,8 @@ describe("NAS stdio adapter", () => {
       "normal",
       name,
       args,
-      expect.any(AbortSignal)
+      expect.any(AbortSignal),
+      "read-write"
     );
   });
   it("conservatively rejects unannotated tools in plan mode", async () => {

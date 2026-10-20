@@ -50,6 +50,12 @@ docker compose -f deploy/remote/compose.yaml up -d --build
 
 本机 Codex／DSH 可设置可信 `remoteMcpConfigFile`，指向当前用户所有、权限600的私有 JSON：`{"endpoint":"https://memory.example.com/mcp","projects":{"codex":{"实际库ID":{"readToken":"项目只读令牌","writeToken":"项目写令牌"}}}}`。每个项目/宿主在 NAS 配独立 `project` 身份，设置 `harness` 与 `requireProjectBinding:true`。本机按真实工作区选择读写身份，计划或未知权限拒写；映射变化取消在途调用，不回退旧 API。工具与每轮公共提示直接取 NAS，NAS 的 `toolGuideExtra` 成为规则来源，本机同名字段不生效。目录连接只发现工具，不执行工具；知识页查询与保存均在 NAS 完成。本机旧后台任务停用，已有知识页的后端刷新配置保留。
 
+子代理只读权限与代码沙箱独立：DSH 按会话头 `origin: "subagent"` 判断，独立 MCP/worker 进程由派发器设置 `HINDSIGHT_MEMORY_ACCESS=read-only`（未知非空值也按只读处理）。NAS 远程模式下，只读调用只使用项目读令牌；本地模式只有单一 `apiToken`，只读由客户端执行层拦截。两种模式均拒绝保存结论和导入文档，并停用本地后台写入；普通主会话保留原权限。Claude Codex 插件须在新建和恢复线程时覆盖同名 Hindsight MCP，要求 runtime 具备 `hindsightCapabilities.subagentMemoryReadOnly=1`，不可用时拒绝派发。
+
+启动和每轮 Hook 加载 NAS 规则最多等待15秒，适应代理、DNS 与 TLS 握手；失败提示和诊断日志仅输出固定错误码及阶段，不输出原始异常或凭据。
+
+私有连接配置可选 `connectAddress`：仅允许 IPv4 内网、回环或 CGNAT 地址，并要求 HTTPS。它只指定 MCP 的 socket 目标，URL、Host、TLS 域名与证书校验保持原样，不改变全局 DNS/TUN，也不在失败时回退公网连接。
+
 ### Project initialization
 
 独立管理 CLI 要求中文显示名；`doctor` 只读，`init` 补齐注册、库、策略和身份，保留已有凭据、拒绝冲突。管理员凭据留在 NAS，本地令牌权限600。先在 NAS 放置 `dist/project-admin.js`：
