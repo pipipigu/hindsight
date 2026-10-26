@@ -15,7 +15,7 @@ export function permissionMode(value: unknown): PermissionMode {
 }
 const claimsSchema = z.object({
   cwd: z.string(),
-  harness: z.enum(["codex", "claude-code"]),
+  harness: z.enum(["codex", "claude-code", "codebuddy"]),
   session: z.string(),
   mode: z.enum(["normal", "plan", "unknown"]),
   tool: z.string(),

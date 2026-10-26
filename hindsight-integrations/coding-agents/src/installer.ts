@@ -279,7 +279,7 @@ function mergeHarnessHooks(
     throw new Error(`${harness} writes its own TOML hook block; mergeHarnessHooks cannot emit it`);
 
   if (
-    (harness === "codex" || harness === "claude-code") &&
+    (harness === "codex" || harness === "claude-code" || harness === "codebuddy") &&
     sharedConfig().bankResolution === "registry"
   ) {
     const entry = cmdHook(dist, "shared-context-hook.js", 10);
@@ -313,7 +313,7 @@ function mergeHarnessHooks(
 }
 
 function stripHarnessHooks(hooks: Record<string, any>, harness: HookHarnessName): void {
-  if (harness === "codex" || harness === "claude-code")
+  if (harness === "codex" || harness === "claude-code" || harness === "codebuddy")
     setOrDelete(hooks, "PreToolUse", stripOurs(hooks.PreToolUse));
   const strippedEvents = new Set<string>();
   const spec = HOOK_HARNESSES[harness];

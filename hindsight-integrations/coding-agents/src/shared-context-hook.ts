@@ -15,7 +15,8 @@ try {
     tool &&
     (name.startsWith("mcp__hindsight__") || name.startsWith("hindsight_"))
   ) {
-    const harness = process.argv[2] === "claude-code" ? "claude-code" : "codex";
+    const arg = process.argv[2];
+    const harness = arg === "claude-code" || arg === "codebuddy" ? arg : "codex";
     const cfg = loadConfig({ harness });
     if (cfg.bankResolution === "registry") {
       if (cfg.disabled) throw new Error("project_disabled");
