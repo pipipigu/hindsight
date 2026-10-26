@@ -2,3 +2,10 @@ node_modules/
 dist/
 # Installer/hook runtime state (installer snapshot + hint rate limits) — machine-local.
 .workspace-mcp.json
+# Private remote deployment credentials and writable conclusion state.
+deploy/remote/config/
+deploy/remote/data/
+deploy/remote/.env
+# Private production-memory regression captures; never ship them with the package.
+tests/fixtures/baseline/
+tests/fixtures/current-state/

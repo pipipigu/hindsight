@@ -53,6 +53,7 @@ function arg(name: string, def?: string): string | undefined {
 
 const REPO = arg("repo");
 const cfg0 = loadConfig({ harness: arg("harness") ?? undefined, path: arg("config") });
+if (cfg0.remoteMcpConfigFile) process.exit(0); // NAS mode has no local ingestion engine.
 const BANK =
   arg("bank") ??
   (REPO ? deriveBankIdOrSkip(cfg0, REPO, arg("harness") ?? cfg0.harness) : cfg0.bankId) ??

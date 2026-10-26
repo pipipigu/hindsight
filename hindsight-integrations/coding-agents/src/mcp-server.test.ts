@@ -13,18 +13,48 @@ import type { HindsightClient } from "./core/hindsight";
 const stubClient = {} as HindsightClient;
 
 describe("selectTools", () => {
+  it("exposes only read tools to a readonly child MCP process", () => {
+    vi.stubEnv("HINDSIGHT_MEMORY_ACCESS", "read-only");
+    try {
+      const tools = selectTools(resolveConfig({}), stubClient, "b");
+      expect(tools.length).toBeGreaterThan(0);
+      expect(tools.every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
+      expect(tools.some((tool) => tool.name === "hindsight_recall")).toBe(true);
+      expect(tools.some((tool) => tool.name === "hindsight_ingest_document")).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+  it("rejects an upstream write handler retained before a readonly downgrade", async () => {
+    const retain = vi.fn();
+    const client = { retain } as unknown as HindsightClient;
+    const tools = selectTools(resolveConfig({ bankResolution: "upstream" }), client, "b");
+    const ingest = tools.find((tool) => tool.name === "hindsight_ingest_document")!;
+    vi.stubEnv("HINDSIGHT_MEMORY_ACCESS", "read-only");
+    try {
+      const result = await ingest.handler({ title: "fixture", content: "fixture" });
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text).code).toBe("memory_readonly");
+      expect(retain).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
   it("returns [] when cfg.disabled is true — a disabled Hindsight exposes NO tools", () => {
     const cfg = resolveConfig({ disabled: true });
     expect(selectTools(cfg, stubClient, "b")).toEqual([]);
   });
 
-  it("returns the eight hindsight_* tool specs when enabled", () => {
+  it("returns the hindsight_* tool specs when enabled", () => {
     const cfg = resolveConfig({});
     const tools = selectTools(cfg, stubClient, "b");
     expect(tools.map((t) => t.name).sort()).toEqual(
       [
         "hindsight_sync_status",
         "hindsight_diagnose",
+        "hindsight_search_observations",
+        "hindsight_recall",
+        "hindsight_read_memory",
         "hindsight_search_knowledge_pages",
         "hindsight_list_knowledge_pages",
         "hindsight_read_knowledge_page",
@@ -220,6 +250,9 @@ describe("buildMcpServer", () => {
     const expected = {
       hindsight_sync_status: readOnly,
       hindsight_diagnose: readOnly,
+      hindsight_search_observations: readOnly,
+      hindsight_recall: readOnly,
+      hindsight_read_memory: readOnly,
       hindsight_search_knowledge_pages: readOnly,
       hindsight_list_knowledge_pages: readOnly,
       hindsight_read_knowledge_page: readOnly,

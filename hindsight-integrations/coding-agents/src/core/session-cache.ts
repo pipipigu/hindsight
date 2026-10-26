@@ -9,7 +9,13 @@ import type { UsageCursorStore } from "./usage";
  * processes, so this temp-file handoff carries lifecycle decisions without writing user config or
  * bank state. */
 export interface SessionCache {
+  recallScope?: string;
+  recallBank?: string;
+  recallTurns?: string[];
+  recallTopic?: { text: string; at: number };
   turns?: number;
+  /** Identity of the last full tool-only policy injected; project/rule changes require a refresh. */
+  queryGuideKey?: string;
   reflectAnswer?: string; // present (even "") = reflect already resolved this session
   /** How many times auto-inject has been ATTEMPTED this session — every source, not just reflect.
    *  A failure leaves `reflectAnswer` unset so a later turn can retry; this bounds that retry (see
@@ -42,11 +48,11 @@ export function readSessionCache(cacheFile: string): SessionCache {
  * measured this class on the per-agent plugin; its Python state writes already had os.replace()).
  */
 function writeFileAtomic(path: string, body: string): void {
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   // The temp name is per-process, so two writers cannot collide on it.
   const tmp = `${path}.${process.pid}.tmp`;
   try {
-    writeFileSync(tmp, body);
+    writeFileSync(tmp, body, { mode: 0o600 });
     renameSync(tmp, path);
   } catch (e) {
     try {

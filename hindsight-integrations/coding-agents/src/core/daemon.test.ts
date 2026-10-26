@@ -212,6 +212,8 @@ describe("every harness entrypoint reaches a daemon", () => {
       "the prompt path, deliberately: a cold start outlives the hook budget and stalls the turn",
     "core/host-client.ts":
       "the shared builder itself, not an entrypoint — its CALLERS are the request origins this checks",
+    "remote/tools.ts":
+      "authenticated HTTP gateway requires an explicit external API; it never launches a local daemon",
   };
 
   /** A module is a request origin if it constructs a client directly OR asks the shared builder

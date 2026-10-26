@@ -177,6 +177,7 @@ describe("pi extension factory", () => {
       getInjection: vi.fn(() => undefined),
       onTranscript: vi.fn(async () => {}),
       flush: vi.fn(async () => {}),
+      dispose: vi.fn(),
       toolSpecs: (): ToolSpec[] => [
         {
           name: "hindsight_reflect",

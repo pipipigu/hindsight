@@ -1,3 +1,12 @@
+import { memoryAccessFor, READ_ONLY_MEMORY_GUIDANCE } from "./memory-access";
+import { fetchRemoteRules } from "./remote-mcp-bridge";
+import { projectDiagnostic } from "./project-diagnostics";
+import { sharedRecall } from "./shared-recall";
+import {
+  MEMORY_SEARCH_GUIDE,
+  buildMemoryQueryGuide,
+  buildMemoryTurnGuide,
+} from "./recall-guidance";
 /**
  * Shared runtime for HOOK-based harnesses (Claude Code, Codex, Cursor CLI, ...).
  *
@@ -21,7 +30,8 @@
  * in `buildHookOutput` (client + cache file in, injection string out) so it's unit-testable
  * without stdin/stdout; `runHook` is thin plumbing around it, with a `makeClient` seam for tests.
  */
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { deriveBankIdOrSkip } from "./bank";
 import type { Config } from "./config";
 import { applyBankConfig, loadConfig } from "./config";
@@ -30,6 +40,8 @@ import { describeError, log, setLogLevel } from "./log";
 import { startBackgroundSeed } from "./seed";
 import type { ClientOpts } from "./hindsight";
 import { HindsightClient, ReflectError } from "./hindsight";
+import type { RecallFact } from "./recall-evidence";
+import { sanitizeSharedText } from "./shared-sanitize";
 import { brandWord } from "./brand";
 import {
   buildReflectQuery,
@@ -87,6 +99,8 @@ export interface HookSpec {
 
 /** Minimal client shape `buildHookOutput` needs — `HindsightClient` satisfies it structurally. */
 interface HookClient {
+  readonly scopeIdentity?: string;
+  readonly apiToken?: string;
   reflect(query: string, opts: { budget?: string; timeoutMs: number }): Promise<string>;
   listPages(): Promise<unknown>;
   searchKnowledgePages(
@@ -94,6 +108,11 @@ interface HookClient {
     opts?: { limit?: number; timeoutMs?: number }
   ): Promise<{ id: string; name: string; snippet: string }[]>;
   recallObservations(query: string, opts: { timeoutMs: number }): Promise<string[]>;
+  recallCandidates?(
+    query: string,
+    opts: { timeoutMs: number; signal?: AbortSignal }
+  ): Promise<RecallFact[]>;
+  getPage?(pageId: string, opts: { timeoutMs: number; signal?: AbortSignal }): Promise<unknown>;
   knowledgePagesSupported?: boolean;
   /** Recorded on reflect failures so the diag trail says which bank to look at server-side. */
   readonly bank?: string;
@@ -235,11 +254,79 @@ export async function buildHookOutput(args: {
   cfg: Config;
   client: HookClient;
   cacheFile: string;
+  turnId?: string;
+  sessionId?: string;
 }): Promise<HookOutput> {
   const { harness, prompt, cfg, client, cacheFile } = args;
 
   const cached = readSessionCache(cacheFile);
   const turns = (cached.turns ?? 0) + 1;
+  if (cfg.bankResolution === "registry" && cfg.autoInject === "none") {
+    // Tool-only mode must also skip the page-roster fetch. Previously "none" still fetched pages
+    // and re-injected their guide; clear old automatic evidence when a session changes modes.
+    const guide = buildMemoryQueryGuide(client.bank, cfg.toolGuideExtra);
+    const queryGuideKey = createHash("sha256").update(guide).digest("hex");
+    const context =
+      harness === "codex" && cached.queryGuideKey === queryGuideKey
+        ? buildMemoryTurnGuide(client.bank, cfg.toolGuideExtra)
+        : guide;
+    // Refresh the full policy when the project or guidance changes, including an existing session
+    // upgrading from the old mandatory-search rule. Codex retains hook context in conversation
+    // history. Other hosts can replace their system prompt each turn, so keep their full policy.
+    writeSessionCache(cacheFile, { turns, queryGuideKey });
+    diag(harness, "query_only", {
+      bank: client.bank,
+      session: args.sessionId,
+      chars: context.length,
+    });
+    return {
+      context,
+      pages: [],
+    };
+  }
+  if (cfg.bankResolution === "registry" && cfg.autoInject === "recall") {
+    const sameBank =
+      cached.recallBank === client.bank && cached.recallScope === client.scopeIdentity;
+    const seen = sameBank ? (cached.recallTurns ?? []) : [];
+    if (args.turnId && seen.includes(args.turnId)) return { context: undefined, pages: [] };
+    const result = await sharedRecall(
+      client,
+      prompt,
+      sameBank ? cached.recallTopic : undefined,
+      cfg.injectTimeoutMs,
+      { candidateTokens: cfg.recallCandidateTokens }
+    );
+    writeSessionCache(cacheFile, {
+      turns,
+      recallTopic: result.topic,
+      recallBank: client.bank,
+      recallScope: client.scopeIdentity,
+      recallTurns: args.turnId ? [...seen, args.turnId].slice(-64) : seen,
+    });
+    diag(harness, "shared_recall", {
+      sources: result.sources,
+      reason: result.reason,
+      chars: result.text.length,
+      bank: client.bank,
+      query: sanitizeSharedText(prompt, [client.apiToken]).slice(0, 160),
+      session: args.sessionId,
+      selected: result.items.map((item) => ({
+        source: item.source,
+        id: item.id,
+        title: item.title,
+        section: item.section,
+      })),
+      ...result.diagnostics,
+    });
+    return {
+      context:
+        result.text ||
+        (result.reason !== "acknowledgement" && result.reason !== "empty"
+          ? MEMORY_SEARCH_GUIDE + `\n项目记忆库：${client.bank ?? "unknown"}。`
+          : undefined),
+      pages: [],
+    };
+  }
 
   // ── auto-inject: once per session, on the first prompt ────────────────────────
   // cfg.autoInject picks the source: a reflect synthesis, a knowledge-page search, or a recall of
@@ -458,12 +545,21 @@ export async function runHook(
   // session's only record of what the user said, and a slow or unreachable server must not be able
   // to cost the turn. Journaling under `retainSessions: false` writes a temp file nothing reads,
   // which is cheaper than threading that decision through two processes to find out.
-  if (spec.journalPrompt) {
+  const readOnly = memoryAccessFor() === "read-only";
+  if (spec.journalPrompt && !cfg.remoteMcpConfigFile && !readOnly) {
     appendJournalTurn(journalPath(spec.harness, sessionId), { role: "user", content: prompt });
   }
 
   const out = (context: string | undefined, notice?: string) =>
-    process.stdout.write(JSON.stringify(spec.emit(context ?? "", notice, ev)));
+    process.stdout.write(
+      JSON.stringify(
+        spec.emit(
+          [context, readOnly ? READ_ONLY_MEMORY_GUIDANCE : ""].filter(Boolean).join("\n"),
+          notice,
+          ev
+        )
+      )
+    );
 
   const sessionRoot = sessionRootDir(spec.harness, sessionId, cwd);
   const derived = deriveBankIdOrSkip(cfg, cwd, spec.harness, sessionRoot);
@@ -475,7 +571,29 @@ export async function runHook(
     log.debug(spec.harness, "hook skipped: bank disabled via banks override", { bank: bankId });
     return;
   }
+  if (cfg.remoteMcpConfigFile) {
+    try {
+      const rules = await fetchRemoteRules(spec.harness, cwd);
+      if (rules) out(rules);
+    } catch (error) {
+      const { code, stage } = projectDiagnostic(error, "remote_mcp_connection_failed");
+      diag(spec.harness, "remote_rules_failed", { code, stage });
+      out(
+        undefined,
+        `NAS MCP rules unavailable: ${code} (${stage}); memory tools have no local fallback.`
+      );
+    }
+    return;
+  }
   const client = makeClient({
+    registryBinding:
+      cfg.bankResolution === "registry"
+        ? {
+            directory: cwd,
+            file: cfg.projectRegistryFile,
+            networkConfigured: cfg.networkConfigured,
+          }
+        : undefined,
     apiUrl: cfg.apiUrl,
     apiToken: cfg.apiToken,
     bank: bankId,
@@ -490,15 +608,24 @@ export async function runHook(
   // ingestion engine. Normally the shared SessionStart lifecycle already did — the engine's
   // per-bank lock makes this a no-op — but a session that predates installation never received
   // SessionStart. This limited fallback heals that case without duplicating any survey logic.
-  if (cfg.autoSeed !== false && !existsSync(cacheFile)) {
+  if (!readOnly && cfg.autoSeed !== false && !existsSync(cacheFile)) {
     startBackgroundSeed(cwd, { limit: cfg.seedLimit, harness: spec.harness });
   }
 
-  const output = await buildHookOutput({ harness: spec.harness, prompt, cfg, client, cacheFile });
+  const output = await buildHookOutput({
+    harness: spec.harness,
+    prompt,
+    cfg,
+    client,
+    cacheFile,
+    turnId: typeof ev.turn_id === "string" ? ev.turn_id : undefined,
+    sessionId,
+  });
   // Mid-session heal: a bank with ZERO pages means the engine never built it (e.g. the session
   // predates the install, so no SessionStart and the first-prompt net already passed). Fire the
   // idempotent engine — the per-bank lock makes repeats free while it builds.
   if (
+    !readOnly &&
     cfg.autoSeed !== false &&
     client.knowledgePagesSupported !== false &&
     output.pages.length === 0

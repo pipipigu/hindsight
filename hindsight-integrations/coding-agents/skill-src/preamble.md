@@ -9,7 +9,19 @@ This machine runs the `hindsight-coding-agents` plugin: long-term project memory
 sessions, backed by a Hindsight server. You (the agent) are already wired into it — this skill
 explains what happens automatically, which tools you have, and how to configure or debug it.
 
-## What happens automatically (no action needed)
+## Registry mode (this fork's default)
+
+Projects use the independent directory registry, not Git-derived bank names. Unmapped projects are inactive. Automatic retrieval defaults to `autoInject: "none"`: the host injects rules without fetching evidence or a page roster; the agent queries explicitly. Automatic conversation capture, Git import and page maintenance are off. Save only new durable preferences, decisions, verified facts or reusable debugging conclusions with `hindsight_save_conclusion(content, evidence)`; never save routine progress or guesses, and do not save on a quota. Only `completed` confirms extraction. Plan or unknown host permissions are read-only. The behavior described below applies to explicit upstream compatibility mode.
+
+项目接入使用 README 中的独立 `project-admin`，普通 MCP 不获得管理权限。代理按目录证据起草中文心智模型，列明用途、范围、查询、来源和待确认项，默认手动刷新。展示 `models-preview` 后取得真实用户批准，才可按对应 hash 执行 `models-apply`；hash 不代表授权。不自动套用五页或把草案导入为事实，空库首次生成可能缺证。
+
+每轮先按当前上下文判断是否需要新的历史证据；确认、衔接或当前对话足以处理时直接执行，用户明确要求查记忆或存在证据缺口时主动查询。Codex 首轮完整规则、后续短提醒，项目或规则变化时刷新。需要查询时，记忆先于本地文件与代码检索：具体事实优先 `hindsight_recall`，归纳经验用 `hindsight_search_observations`，概览与专题用知识页搜索，综合整理可直接用 `hindsight_reflect`。按需选择，不必全部调用；证据足够就停，补查只针对缺口。提案、历史报告与二次摘要须注明范围和时间；声称现行须有实施证据，导入时间不代表实施时间；不同模块不能直接拼接规则。推导须标明，冲突或缺失保留待确认；只凭记忆时不查本地。工具绑定当前项目库，保留服务端排序；`temporal_window` 影响排序，不是严格日期过滤。
+
+两个检索工具默认精简 JSON：按服务端顺序最多返回5条完整事实，整包限约3000 tokens（分段 cl100k_base 估算，实际模型用量不同），包含来源与规则。`limit` 可调至10，`output_tokens` 可降低；`max_tokens` 只管服务端正文。`matched_count` 是本次取到的候选数，`omitted_count` 是未展示数，非全库总数。长事实只给 `requires_read` 地址，不截成结论；用 `hindsight_read_memory(memory_id)` 按需读取，`section=original` 只读该事实自己的原文，`section=provenance` 读完整来源状态。长内容按 `next_offset` 和 `content_hash` 续读，证据或项目变化时从头读。`seen_ids` 仅填当前上下文仍有正文的旧ID；引用失效时重读。F/C 引用在本次结果内有效；`source_ids` 可读取未返回的支撑事实。实体、原文和支撑事实共享整包预算，优先完整事实。`output_format=raw` 保留完整 API；`trace=true` 未指定格式时也使用 raw，二者仅用于用户明确要求的详细调试。
+
+## Upstream-mode automatic behavior
+
+知识页也按预算分页，续读用 `next_offset/content_hash`，生成描述按需用 `part=metadata`；Reflect 不变。
 
 - **Per-repo memory bank**: each repository resolves to a bank (shown in the session banner:
   `↳ memory bank “coding-agent::<repo>”`). Worktrees share the main repo's bank.
@@ -38,8 +50,11 @@ When the user says "store this in hindsight" / "remember this":
 
 ## Retrieving
 
-- `hindsight_search_knowledge_pages(query)` — FIRST STOP for project questions (components,
-  conventions, past decisions, initiatives). Server-side hybrid search, fast.
+- `hindsight_recall(query)` — concrete facts and experiences; preferred for factual questions.
+- `hindsight_search_observations(query)` — consolidated experience with supporting facts.
+- `hindsight_search_knowledge_pages(query)` — project overviews and topics (components,
+  conventions, past decisions, initiatives). Server-side hybrid search, fast; not a prerequisite
+  for recall or reflect. Read a full page only when the snippet leaves a relevant evidence gap.
 - `hindsight_read_knowledge_page(page_id)` / `hindsight_list_knowledge_pages` — read pages fully.
 - `hindsight_reflect(query)` — deep reasoning over the whole memory for WHY questions and exact
   decided values; slower (seconds), use deliberately.

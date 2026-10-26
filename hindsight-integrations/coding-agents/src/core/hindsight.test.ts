@@ -597,7 +597,9 @@ describe("every memory write goes through the one call site that scopes it", () 
     const body = src.slice(src.indexOf("async retain("), src.indexOf('bankUrl("/memories")'));
     // The scoping may be derived per document (see `per_source`), but it must still be set on the
     // item here and still come from the configured value — not from a server default.
-    expect(body).toMatch(/observation_scopes: .*this\.observationScopes/);
+    expect(body).toMatch(
+      /observation_scopes: resolveRetainScopes\([\s\S]*?this\.observationScopes/
+    );
   });
 });
 
@@ -714,6 +716,58 @@ describe("HindsightClient.reflect failures", () => {
 });
 
 describe("HindsightClient.recallObservations", () => {
+  it("separates automatic candidate retrieval tokens from legacy recall budgets", async () => {
+    const requests: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url, init) => {
+        requests.push(JSON.parse(String(init?.body)));
+        return jsonResponse(200, { results: [] });
+      })
+    );
+    const client = new HindsightClient({ apiUrl: "http://x", bank: "b" });
+    await client.recallCandidates("query", { timeoutMs: 1000, candidateTokens: 6000 });
+    await client.recallObservations("query", { timeoutMs: 1000 });
+    expect(requests.map((r) => r.max_tokens)).toEqual([6000, 2000]);
+  });
+  it("retains memory identities, dates and finite semantic scores for automatic recall", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(200, {
+          results: [
+            {
+              id: "fact-1",
+              text: "Rule",
+              document_id: "doc-1",
+              mentioned_at: "2026-10-08",
+              scores: { reranker: 0.9, semantic: 0.7 },
+            },
+          ],
+        })
+      )
+    );
+    const client = new HindsightClient({ apiUrl: "http://x", bank: "b" });
+    expect(await client.recallCandidates("Rule", { timeoutMs: 1000 })).toMatchObject([
+      {
+        id: "fact-1",
+        text: "Rule",
+        document_id: "doc-1",
+        mentioned_at: "2026-10-08",
+        scores: { reranker: 0.9, semantic: 0.7 },
+      },
+    ]);
+  });
+
+  it("bounds automatic page responses while keeping explicit page reads available", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(200, { id: "p", name: "Rule", body: "x".repeat(1000) }))
+    );
+    const client = new HindsightClient({ apiUrl: "http://x", bank: "b" });
+    await expect(client.getPage("p", { maxBodyBytes: 100 })).rejects.toThrow("page_body_too_large");
+    expect(await client.getPage("p")).toMatchObject({ id: "p", body: "x".repeat(1000) });
+  });
   it("merges recallOptions key-by-key over the defaults, leaving untouched keys alone", async () => {
     const fetchMock = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
       jsonResponse(200, { results: [{ text: "only" }] })

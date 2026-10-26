@@ -3,6 +3,8 @@ import {
   createDshHooks,
   dshSessionEvents,
   ownEvents,
+  dshPermissionMode,
+  runDshTool,
   toDshParameters,
   type Workspace,
 } from "./dsh";
@@ -37,6 +39,86 @@ function fakeWorkspace(core: Partial<Workspace["core"]>): Workspace {
 }
 
 const enter = (messages: unknown[]) => async () => ({ kind: "enter" as const, messages }) as never;
+
+describe("dsh scoped permissions and tool failures", () => {
+  const scopedAgent = (plan: unknown) => ({
+    session: { header: { id: "scoped", cwd: "/repo" } },
+    ctx: { get: (name: string) => (name === "planMode" ? plan : undefined) },
+  });
+
+  it("uses the calling agent's plan service, including pending plan entry", () => {
+    expect(dshPermissionMode(scopedAgent({ get: () => ({ active: false }) }))).toBe("normal");
+    expect(dshPermissionMode(scopedAgent({ get: () => ({ active: true }) }))).toBe("plan");
+    expect(dshPermissionMode(scopedAgent({ get: () => ({ active: false, pending: true }) }))).toBe(
+      "plan"
+    );
+  });
+
+  it("refuses writes when the caller's scoped permission state is missing or unreadable", () => {
+    expect(dshPermissionMode({ session: { header: { id: "unscoped" } } })).toBe("unknown");
+    expect(dshPermissionMode(scopedAgent(undefined))).toBe("unknown");
+    expect(
+      dshPermissionMode({
+        session: { header: { id: "broken" } },
+        ctx: {
+          get: () => {
+            throw new Error("unavailable");
+          },
+        },
+      })
+    ).toBe("unknown");
+    expect(
+      dshPermissionMode(
+        scopedAgent({
+          get: () => {
+            throw new Error("unavailable");
+          },
+        })
+      )
+    ).toBe("unknown");
+  });
+
+  it("reads logged plan selections when the preset isolates the controller service", () => {
+    let state = {
+      active: false,
+      wanted: null as boolean | null,
+      running: null as { wanted: boolean } | null,
+      activeAtLastHeader: false,
+    };
+    const agent = {
+      session: { header: { id: "isolated" } },
+      ctx: {
+        get: (name: string) =>
+          name === "sessionProjections"
+            ? {
+                stateOf: (session: unknown, key: string) => {
+                  expect(session).toBe(agent.session);
+                  expect(key).toBe("plan");
+                  return state;
+                },
+              }
+            : undefined,
+      },
+    };
+    expect(dshPermissionMode(agent)).toBe("normal");
+    state.wanted = true;
+    expect(dshPermissionMode(agent)).toBe("plan");
+    state = { active: false, wanted: null, running: { wanted: true }, activeAtLastHeader: false };
+    expect(dshPermissionMode(agent)).toBe("plan");
+    state = { active: false, wanted: null, running: null, activeAtLastHeader: true };
+    expect(dshPermissionMode(agent)).toBe("plan");
+  });
+
+  it("preserves permission context and converts failed tool results to host errors", async () => {
+    const handler = vi.fn(async () => ({
+      content: [{ type: "text" as const, text: "plan_readonly" }],
+      isError: true,
+    }));
+    const spec = { name: "hindsight_save_conclusion", handler } as unknown as ToolSpec;
+    await expect(runDshTool(spec, { content: "fixture" }, "plan")).rejects.toThrow("plan_readonly");
+    expect(handler).toHaveBeenCalledWith({ content: "fixture" }, { permission: "plan" });
+  });
+});
 
 describe("dsh pre-step injection", () => {
   it("recalls on the human prompt and appends the memory as a sourced message", async () => {
@@ -303,20 +385,36 @@ describe("toDshParameters", () => {
         relates_to_page_id: { type: "string" },
       },
       required: ["title", "summary"],
+      additionalProperties: false,
     });
   });
 
   it("omits `required` for a tool that takes no arguments", () => {
-    expect(toDshParameters(spec({}))).toEqual({ type: "object", properties: {} });
+    expect(toDshParameters(spec({}))).toEqual({
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    });
   });
 
-  it("refuses a parameter shape the projection cannot express", () => {
-    expect(() => toDshParameters(spec({ limit: z.number() as never }))).toThrow(
-      /string parameters only/
+  it("preserves typed Recall options instead of projecting them as strings", () => {
+    const parameters = toDshParameters(
+      spec({
+        max_tokens: z.number().int().min(1).max(4096).optional(),
+        types: z.array(z.enum(["world", "experience"])).optional(),
+        trace: z.boolean().optional(),
+        include: z
+          .object({ chunks: z.object({ max_tokens: z.number().int() }).optional() })
+          .optional(),
+      })
     );
-    // The guard must see THROUGH `.optional()`, not treat every optional as a string.
-    expect(() => toDshParameters(spec({ limit: z.number().optional() as never }))).toThrow(
-      /string parameters only/
-    );
+    expect(parameters).toMatchObject({
+      properties: {
+        max_tokens: { type: "integer", minimum: 1, maximum: 4096 },
+        types: { type: "array", items: { type: "string", enum: ["world", "experience"] } },
+        trace: { type: "boolean" },
+        include: { type: "object", properties: { chunks: { type: "object" } } },
+      },
+    });
   });
 });

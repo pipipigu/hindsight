@@ -1,3 +1,7 @@
+import { createHash as identityHash } from "node:crypto";
+import { assertProjectBinding, resolveRegisteredProject } from "./project-registry";
+import type { RecallFact, RecallScores } from "./recall-evidence";
+import type { RecallQuery } from "./recall-query";
 /**
  * Harness-agnostic Hindsight HTTP client (raw fetch, no SDK dep).
  *
@@ -100,7 +104,20 @@ export function resolveRetainScopes(
  */
 export const DEFAULT_OBSERVATION_SCOPES: ObservationScopes = "shared";
 
+/** Constructed only by the authenticated HTTP adapter; never accepted from tool arguments. */
+export interface RemoteBinding {
+  principalId: string;
+  policyRevision: string;
+  credentialId: string;
+  assertRead: () => void;
+  assertWrite: () => void;
+}
+
 export interface ClientOpts {
+  remoteBinding?: RemoteBinding;
+  /** Stable backend identity shared by local and remote aliases for conclusion deduplication. */
+  dedupScopeId?: string;
+  registryBinding?: { directory: string; file?: string; networkConfigured?: boolean };
   apiUrl: string;
   apiToken?: string;
   bank: string;
@@ -136,6 +153,9 @@ export interface ClientOpts {
 }
 
 export interface RetainOpts {
+  /** Durable queues require a matching receipt, never a swallowed parse failure. */
+  requireOperationReceipt?: boolean;
+  observationScopes?: ObservationScopes;
   timestamp?: string; // when the content occurred (temporal ranking)
   metadata?: Record<string, string>; // source provenance (returned with recalls)
   /** "append" concatenates `content` onto the stored document instead of replacing it — the whole
@@ -359,7 +379,51 @@ function signalOnlyDispatcher(): unknown {
   );
 }
 
+/** Automatic recall reads bounded page bodies; explicit user-invoked reads retain their contract. */
+async function pageJson(response: Response, limit?: number): Promise<unknown> {
+  if (limit === undefined) return response.json();
+  if (Number(response.headers.get("content-length")) > limit) {
+    await response.body?.cancel();
+    throw new Error("page_body_too_large");
+  }
+  if (!response.body) throw new Error("page_body_unavailable");
+  const reader = response.body.getReader(),
+    chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      size += chunk.value.byteLength;
+      if (size > limit) {
+        await reader.cancel();
+        throw new Error("page_body_too_large");
+      }
+      chunks.push(chunk.value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export class HindsightClient {
+  readonly remoteBinding?: RemoteBinding;
+  readonly dedupScopeId: string;
+  readonly registryBinding?: ClientOpts["registryBinding"];
+  private readonly boundCredential?: string;
+  private lifecycleSignal?: AbortSignal;
+  bindCancellation(signal: AbortSignal): void {
+    this.lifecycleSignal = this.lifecycleSignal
+      ? AbortSignal.any([this.lifecycleSignal, signal])
+      : signal;
+  }
   readonly apiUrl: string;
   /** The credential the NEXT request will sign with — NOT the one the config file holds. The two
    *  diverge exactly when #3600 bites, which is why `hindsight_diagnose` reports both. */
@@ -380,6 +444,22 @@ export class HindsightClient {
   private readonly rateLimitPatienceMs: number;
 
   constructor(o: ClientOpts) {
+    if (o.registryBinding && o.remoteBinding) throw new Error("ambiguous_memory_binding");
+    this.remoteBinding = o.remoteBinding ? Object.freeze({ ...o.remoteBinding }) : undefined;
+    this.dedupScopeId = o.dedupScopeId ?? o.apiUrl.replace(/\/$/, "");
+    this.registryBinding = o.registryBinding;
+    this.boundCredential = o.apiToken;
+    if (o.registryBinding || o.remoteBinding) {
+      const endpoint = new URL(o.apiUrl);
+      if (
+        !["http:", "https:"].includes(endpoint.protocol) ||
+        endpoint.username ||
+        endpoint.password ||
+        endpoint.search ||
+        endpoint.hash
+      )
+        throw new Error("invalid_memory_endpoint");
+    }
     this.apiUrl = o.apiUrl.replace(/\/$/, "");
     this.token = o.apiToken;
     this.tokenProvider = o.tokenProvider;
@@ -394,6 +474,34 @@ export class HindsightClient {
     // mutation everyone's.
     this.recallOptions = { ...DEFAULT_RECALL_OPTIONS, ...o.recallOptions };
     this.rateLimitPatienceMs = o.rateLimitPatienceMs ?? 0;
+  }
+
+  /** Hash only: session hints must expire across bank, registry or credential changes. */
+  get scopeIdentity(): string {
+    let revision = "";
+    try {
+      if (this.registryBinding)
+        revision = resolveRegisteredProject(
+          this.registryBinding.directory,
+          this.registryBinding.file
+        ).revision;
+    } catch {
+      revision = "invalid";
+    }
+    return identityHash("sha256")
+      .update(
+        JSON.stringify([
+          this.apiUrl,
+          this.bank,
+          this.boundCredential,
+          this.registryBinding?.directory,
+          revision,
+          this.remoteBinding?.principalId,
+          this.remoteBinding?.policyRevision,
+          this.remoteBinding?.credentialId,
+        ])
+      )
+      .digest("hex");
   }
 
   /** The credential in use, for diagnostics. Never log or report the VALUE — booleans only. */
@@ -441,13 +549,73 @@ export class HindsightClient {
    * bounds the whole call.
    */
   private async fetchWithAuth(url: string, init: RequestInit): Promise<Response> {
+    const assertScope = () => {
+      if (this.remoteBinding) {
+        const bankUrl = this.bankUrl();
+        const chunkPrefix = `${this.apiUrl}/v1/default/chunks/`;
+        const originalRead =
+          (init.method ?? "GET").toUpperCase() === "GET" &&
+          url.startsWith(chunkPrefix) &&
+          url.slice(chunkPrefix.length).length > 0 &&
+          !url.slice(chunkPrefix.length).includes("/") &&
+          !url.includes("?");
+        if (
+          !originalRead &&
+          url !== `${this.apiUrl}/version` &&
+          url !== bankUrl &&
+          !url.startsWith(`${bankUrl}/`) &&
+          !url.startsWith(`${bankUrl}?`)
+        )
+          throw new Error("remote_scope_changed");
+        this.remoteBinding.assertRead();
+        const method = (init.method ?? "GET").toUpperCase();
+        const readPost =
+          method === "POST" &&
+          ["/memories/recall", "/reflect"].some((suffix) => url === this.bankUrl(suffix));
+        if (!["GET", "HEAD"].includes(method) && !readPost) this.remoteBinding.assertWrite();
+      }
+      if (this.registryBinding?.networkConfigured === false)
+        throw new Error("memory_endpoint_not_configured");
+      if ((this.registryBinding || this.remoteBinding) && this.token !== this.boundCredential)
+        throw new Error("credential_scope_changed");
+      if (this.registryBinding)
+        assertProjectBinding(this.registryBinding.directory, this.bank, this.registryBinding.file);
+    };
+    assertScope();
+    if ((this.registryBinding || this.remoteBinding) && url !== this.bankUrl("/stats")) {
+      const health = await this.fetchWithAuth(this.bankUrl("/stats"), {
+        method: "GET",
+        signal: init.signal,
+      });
+      if (!health.ok)
+        throw new Error(
+          health.status === 404 ? "project_bank_missing" : "project_bank_unavailable"
+        );
+      const stats = (await health.json()) as { bank_id?: string };
+      if (stats.bank_id !== this.bank) throw new Error("project_bank_mismatch");
+    }
     // Only a request with its own deadline drops undici's timeouts; the drain poll has none.
     const dispatcher = init.signal ? signalOnlyDispatcher() : undefined;
-    const send = () =>
-      fetch(url, { ...init, headers: this.headers(), ...(dispatcher ? { dispatcher } : {}) });
-    const r = await send();
-    if (r.status !== 401 || !this.refreshToken()) return r;
-    return send();
+    const send = () => {
+      assertScope();
+      return fetch(url, {
+        ...init,
+        headers: this.headers(),
+        ...(dispatcher ? { dispatcher } : {}),
+        signal: this.lifecycleSignal
+          ? AbortSignal.any([this.lifecycleSignal, ...(init.signal ? [init.signal] : [])])
+          : init.signal,
+      });
+    };
+    let r = await send();
+    assertScope();
+    if (r.status === 401 && this.refreshToken()) r = await send();
+    if (this.remoteBinding && r.ok && url.startsWith(`${this.apiUrl}/v1/default/chunks/`)) {
+      const chunk = (await pageJson(r.clone(), 4 * 1024 * 1024)) as { bank_id?: unknown };
+      if (chunk.bank_id !== this.bank) throw new Error("project_bank_mismatch");
+      assertScope();
+    }
+    return r;
   }
 
   /** A 401 with no `Authorization` header is a different failure from a rejected key, and the
@@ -469,7 +637,8 @@ export class HindsightClient {
     url: string,
     body?: unknown,
     tolerate: number[] = [],
-    timeoutMs = 15_000
+    timeoutMs = 15_000,
+    signal?: AbortSignal
   ): Promise<Response> {
     // Hard cap on EVERY request: a stalled server (pool deadlock, network) must degrade to a
     // memoryless turn — never hang a host that awaits us (opencode blocks its BOOT on plugin init).
@@ -479,7 +648,9 @@ export class HindsightClient {
       r = await this.fetchWithAuth(url, {
         method,
         body: payload,
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+          : AbortSignal.timeout(timeoutMs),
       });
       if (r.status !== 429 || tolerate.includes(429)) break;
       const asked = retryAfterMs(r.headers.get("retry-after"));
@@ -495,6 +666,29 @@ export class HindsightClient {
         `${method} ${url} -> ${r.status} ${await r.text()}${this.authHint(r.status)}`
       );
     return r;
+  }
+
+  /** Strict retain used by the durable conclusion queue; an unknown receipt stays retryable. */
+  async submitConclusion(
+    id: string,
+    item: {
+      content: string;
+      context: string;
+      document_id: string;
+      tags: string[];
+      strategy: string;
+      timestamp: string;
+      metadata: Record<string, string>;
+      observation_scopes: ObservationScopes;
+    }
+  ): Promise<void> {
+    await this.retain(item.content, item.context, item.document_id, item.tags, item.strategy, {
+      timestamp: item.timestamp,
+      metadata: item.metadata,
+      operationId: id,
+      observationScopes: item.observation_scopes,
+      requireOperationReceipt: true,
+    });
   }
 
   /** Retain one memory. ALWAYS async: enqueue extraction server-side and collect its op-id for
@@ -516,7 +710,10 @@ export class HindsightClient {
       // Sent on EVERY retain, including the server default `combined`, so the scoping a bank's
       // observations were built under is a property of the write rather than of whichever server
       // version happened to process it. Servers older than 0.4.15 ignore the field.
-      observation_scopes: resolveRetainScopes(tags, this.observationScopes),
+      observation_scopes: resolveRetainScopes(
+        tags,
+        opts.observationScopes ?? this.observationScopes
+      ),
     };
     if (opts.timestamp) item.timestamp = opts.timestamp;
     if (opts.metadata) item.metadata = opts.metadata;
@@ -526,9 +723,12 @@ export class HindsightClient {
     const r = await this.req("POST", this.bankUrl("/memories"), body);
     try {
       const j = (await r.json()) as { operation_id?: string };
+      if (opts.requireOperationReceipt && (!r.ok || j.operation_id !== opts.operationId))
+        throw new Error("operation_id_mismatch");
       if (j.operation_id) this.opIds.push(j.operation_id);
-    } catch {
-      /* ignore */
+    } catch (e) {
+      if (opts.requireOperationReceipt) throw e;
+      /* Legacy callers tolerate receipt parsing failures. Durable queues cannot. */
     }
   }
 
@@ -668,6 +868,11 @@ export class HindsightClient {
       defaults?: Record<string, unknown>;
     } = {}
   ): Promise<void> {
+    if (this.remoteBinding) throw new Error("remote_bank_management_denied");
+    if (this.registryBinding) {
+      await this.seedPages(opts.pageTrigger, opts.pages, opts.customPages);
+      return;
+    }
     if (opts.reset) {
       await this.req("DELETE", this.bankUrl());
       this.log(`[bank] reset ${this.bank}`);
@@ -837,29 +1042,138 @@ export class HindsightClient {
     }
   }
 
-  /**
-   * Raw recall with no LLM in the loop, so it still answers when reflect's synthesis times out or
-   * 5xxs. The body is `recallOptions` (consolidated observations by default) — a bank that grows
-   * no observations widens it rather than getting nothing back. Returns the texts in rank order.
-   *
-   * The name predates `recallOptions` (the observation type used to be hardcoded here) and is
-   * kept deliberately: this is the client's published surface, so renaming it would break
-   * importers for a cosmetic gain. The doc above is the contract, not the name.
-   */
+  /** Explicit tools use the same request/response as the web Recall analyzer, with no automatic
+   * injection settings, local reranking or token clipping applied to the returned evidence. */
+  async queryMemories(query: RecallQuery): Promise<Record<string, unknown>> {
+    const identity = this.scopeIdentity;
+    const stop = new AbortController();
+    const timer = setTimeout(() => stop.abort(), 45000);
+    try {
+      const response = await this.req(
+        "POST",
+        this.bankUrl("/memories/recall"),
+        query,
+        [],
+        45000,
+        stop.signal
+      );
+      if (response.status === 404) throw new Error("project_bank_missing");
+      const value = await pageJson(response, 4 * 1024 * 1024);
+      if ((this.registryBinding || this.remoteBinding) && this.scopeIdentity !== identity)
+        throw new Error("project_scope_changed");
+      if (
+        !value ||
+        typeof value !== "object" ||
+        Array.isArray(value) ||
+        !Array.isArray((value as Record<string, unknown>).results)
+      )
+        throw new Error("invalid_memory_response");
+      return value as Record<string, unknown>;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Addressed reads remain bound to this project, including the bank carried by a chunk. */
+  async readMemory(
+    memoryId: string,
+    includeOriginal = false
+  ): Promise<{ memory: Record<string, unknown>; original?: Record<string, unknown> }> {
+    const identity = this.scopeIdentity;
+    const stop = new AbortController();
+    const timer = setTimeout(() => stop.abort(), 45000);
+    const read = async (url: string, missing: string) => {
+      const response = await this.req("GET", url, undefined, [], 45000, stop.signal);
+      if (response.status === 404) throw new Error(missing);
+      const value = await pageJson(response, 4 * 1024 * 1024);
+      if ((this.registryBinding || this.remoteBinding) && this.scopeIdentity !== identity)
+        throw new Error("project_scope_changed");
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        throw new Error("invalid_memory_response");
+      return value as Record<string, unknown>;
+    };
+    try {
+      const memory = await read(
+        this.bankUrl(`/memories/${encodeURIComponent(memoryId)}`),
+        "memory_not_found"
+      );
+      if (
+        typeof memory.id !== "string" ||
+        memory.id.toLowerCase() !== memoryId.toLowerCase() ||
+        typeof memory.text !== "string"
+      )
+        throw new Error("invalid_memory_response");
+      if (!includeOriginal) return { memory };
+      if (typeof memory.chunk_id !== "string" || !memory.chunk_id)
+        throw new Error("memory_original_unavailable");
+      // The model cannot supply a chunk ID. It comes exclusively from the bank-scoped fact.
+      const original = await read(
+        `${this.apiUrl}/v1/default/chunks/${encodeURIComponent(memory.chunk_id)}`,
+        "memory_original_unavailable"
+      );
+      if (original.bank_id !== this.bank || original.chunk_id !== memory.chunk_id)
+        throw new Error("project_bank_mismatch");
+      if (typeof original.chunk_text !== "string") throw new Error("invalid_memory_response");
+      return { memory, original };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Automatic/legacy recall uses the configured `recallOptions` (observations by default).
+   * The historical name is kept for existing callers; explicit tools use queryMemories instead. */
   async recallObservations(query: string, opts: { timeoutMs: number }): Promise<string[]> {
+    return (await this.recallCandidates(query, opts)).map((row) => row.text);
+  }
+
+  /** Keep identities, dates and semantic scores for shared recall; legacy callers still get strings. */
+  async recallCandidates(
+    query: string,
+    opts: { timeoutMs: number; signal?: AbortSignal; candidateTokens?: number }
+  ): Promise<RecallFact[]> {
     const r = await this.req(
       "POST",
       this.bankUrl("/memories/recall"),
       // `query` is applied AFTER the spread: everything else is the caller's to override, but a
       // config that could replace the goal with a fixed string would silently recall for the
       // wrong question on every turn.
-      { ...this.recallOptions, query },
+      {
+        ...this.recallOptions,
+        ...(opts.candidateTokens === undefined
+          ? {}
+          : { max_tokens: Math.max(1, Math.min(12000, Math.floor(opts.candidateTokens))) }),
+        query,
+      },
       [],
-      opts.timeoutMs
+      opts.timeoutMs,
+      opts.signal
     );
     if (r.status === 404) return [];
-    const j = (await r.json()) as { results?: { text?: string }[] };
-    return (j.results ?? []).map((x) => (x.text ?? "").trim()).filter(Boolean);
+    const j = (await r.json()) as { results?: Record<string, unknown>[] };
+    if (!Array.isArray(j.results)) return [];
+    return j.results.flatMap((row) => {
+      if (!row || typeof row.text !== "string" || !row.text.trim()) return [];
+      const scores: RecallScores = {};
+      for (const key of ["reranker", "semantic", "final", "keyword"] as const) {
+        const value =
+          row.scores && typeof row.scores === "object"
+            ? (row.scores as Record<string, unknown>)[key]
+            : undefined;
+        if (typeof value === "number" && Number.isFinite(value)) scores[key] = value;
+      }
+      const string = (key: string) =>
+        typeof row[key] === "string" ? (row[key] as string) : undefined;
+      return [
+        {
+          text: row.text.trim(),
+          id: string("id"),
+          document_id: string("document_id"),
+          mentioned_at: string("mentioned_at"),
+          occurred_start: string("occurred_start"),
+          scores,
+        },
+      ];
+    });
   }
 
   /**
@@ -930,14 +1244,21 @@ export class HindsightClient {
    * the page — that is 70-95% of the raw bytes and can blow past an MCP host's per-tool-result
    * token cap.
    */
-  async getPage(pageId: string): Promise<unknown> {
+  async getPage(
+    pageId: string,
+    opts: { timeoutMs?: number; signal?: AbortSignal; maxBodyBytes?: number } = {}
+  ): Promise<unknown> {
     if (this.knowledgePagesSupported === false) throw new KnowledgePagesUnavailableError();
     const r = await this.req(
       "GET",
-      this.bankUrl(`/knowledge-base/pages/${encodeURIComponent(pageId)}`)
+      this.bankUrl(`/knowledge-base/pages/${encodeURIComponent(pageId)}`),
+      undefined,
+      [],
+      opts.timeoutMs ?? 15000,
+      opts.signal
     );
     if (r.status === 404) throw new Error(`knowledge page not found: ${pageId}`);
-    return shapePage(await r.json());
+    return shapePage(await pageJson(r, opts.maxBodyBytes));
   }
 
   /** Hybrid (BM25 + vector, RRF-fused) server-side search over the bank's knowledge pages.
@@ -945,7 +1266,7 @@ export class HindsightClient {
    *  hindsight_search_knowledge_pages. */
   async searchKnowledgePages(
     query: string,
-    opts: { limit?: number; timeoutMs?: number } = {}
+    opts: { limit?: number; timeoutMs?: number; signal?: AbortSignal } = {}
   ): Promise<
     { id: string; name: string; source_query?: string; snippet: string; score: number }[]
   > {
@@ -956,7 +1277,8 @@ export class HindsightClient {
       this.bankUrl(`/knowledge-base/search${q}`),
       undefined,
       [],
-      opts.timeoutMs
+      opts.timeoutMs,
+      opts.signal
     );
     // Routed through the same check as every other page endpoint. Without it a server with no
     // knowledge-base API parsed its own 404 body into zero hits and reported "nothing matched"
@@ -1011,9 +1333,13 @@ export class HindsightClient {
       }
       throw e;
     }
-    for (const n of roots) {
-      if (n.kind === "page" && n.name) existing.set(n.name.toLowerCase(), n);
-    }
+    const walk = (nodes: KnowledgeNode[]) => {
+      for (const n of nodes) {
+        if (n.kind === "page" && n.name) existing.set(n.name.toLowerCase(), n);
+        if (n.children) walk(n.children);
+      }
+    };
+    walk(roots);
     let created = 0;
     let updated = 0;
     let vanished = 0; // deleted under us mid-run — neither re-synced nor unchanged
@@ -1044,6 +1370,7 @@ export class HindsightClient {
         }
         if (r.status !== 409) created++;
       } else {
+        if (this.registryBinding) continue;
         const sourceDrift = hit.description !== page.source_query;
         // Older servers omit trigger from the tree, so an absent value means unknown rather
         // than drift. Those servers also reject a trigger-only PATCH as an empty update.
@@ -1092,7 +1419,9 @@ export class HindsightClient {
         updated++;
       }
     }
-    const initiatives = await this.resyncInitiativeTriggers(roots, pageTrigger);
+    const initiatives = this.registryBinding
+      ? 0
+      : await this.resyncInitiativeTriggers(roots, pageTrigger);
     this.log(
       `[bank] knowledge pages seeded on ${this.bank} (scoped to ${this.project ?? "the shared bank"}): ` +
         `${created} created, ${updated} re-synced, ` +

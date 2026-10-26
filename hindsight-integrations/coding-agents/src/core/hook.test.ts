@@ -7,6 +7,7 @@ import { buildHookOutput, runHook } from "./hook";
 import { diagFilePath } from "./diag";
 import { ReflectError } from "./hindsight";
 import { buildReflectQuery } from "./inject";
+import { MEMORY_EVIDENCE_GUIDE, MEMORY_QUERY_DECISION_GUIDE } from "./recall-guidance";
 
 let root: string;
 let cacheFile: string;
@@ -61,6 +62,105 @@ function makeClient(
 }
 
 describe("buildHookOutput", () => {
+  it.each(["dsh", "codex", "claude-code", "pi"])(
+    "injects rules without retrieval or old cached evidence for %s in registry tool-only mode",
+    async (harness) => {
+      mkdirSync(join(root, "cache"), { recursive: true });
+      writeFileSync(
+        cacheFile,
+        JSON.stringify({
+          turns: 4,
+          reflectAnswer: "STALE AUTOMATIC EVIDENCE",
+          pages: { atTurn: 4, list: [{ id: "old-page", title: "Old page" }] },
+          recallTurns: ["old-turn"],
+        })
+      );
+      const client = {
+        ...makeClient(),
+        bank: "mapped",
+        searchKnowledgePages: vi.fn(async () => []),
+        recallObservations: vi.fn(async () => []),
+      };
+      const out = await buildHookOutput({
+        harness,
+        prompt: "Which field and version apply to this component?",
+        cfg: resolveConfig({ bankResolution: "registry", toolGuideExtra: "Team evidence rule" }),
+        client,
+        cacheFile,
+      });
+      expect(out.context).toContain("后台自动检索已关闭");
+      expect(out.context).toContain("content 和 evidence");
+      expect(out.context).toContain("mapped");
+      expect(out.context).toContain("Team evidence rule");
+      expect(out.context).not.toMatch(/STALE AUTOMATIC|old-page|Old page/);
+      expect(out.pages).toEqual([]);
+      for (const method of [
+        "reflect",
+        "listPages",
+        "searchKnowledgePages",
+        "recallObservations",
+      ] as const)
+        expect(client[method]).not.toHaveBeenCalled();
+      expect(JSON.parse(readFileSync(cacheFile, "utf8"))).toEqual({
+        turns: 5,
+        queryGuideKey: expect.any(String),
+      });
+    }
+  );
+
+  it.each(["dsh", "codex", "claude-code", "pi"])(
+    "reminds %s on every submission without classifying or fetching, and refreshes changed policy",
+    async (harness) => {
+      const client = { ...makeClient(), bank: "mapped" };
+      let cfg = resolveConfig({
+        bankResolution: "registry",
+        toolGuideExtra: "Shared memory summary instruction",
+      });
+      const submit = (prompt: string) =>
+        buildHookOutput({ harness, prompt, cfg, client, cacheFile });
+      const first = await submit("项目的历史接口约定是什么？");
+      expect(first.context).toContain(MEMORY_EVIDENCE_GUIDE);
+      expect(first.context).toContain("Shared memory summary instruction");
+      for (const prompt of [
+        "继续吧",
+        "开始",
+        "我需要重启chatgpt吗",
+        "这个主动搜索什么时候进行，每次需要我说吗？",
+        "请查记忆中的接口约定",
+        "继续吧，但旧版本的接口有什么不同？",
+      ]) {
+        const next = await submit(prompt);
+        expect(next.context).toContain(MEMORY_QUERY_DECISION_GUIDE);
+        expect(next.context).toContain("mapped");
+        expect(next.context).toContain("hindsight_recall");
+        expect(next.context).toContain("Shared memory summary instruction");
+        if (harness === "codex") {
+          expect(next.context).not.toContain(MEMORY_EVIDENCE_GUIDE);
+          expect(next.context!.length).toBeLessThan(first.context!.length / 2);
+        } else {
+          expect(next.context).toContain(MEMORY_EVIDENCE_GUIDE);
+        }
+        expect(next.pages).toEqual([]);
+      }
+      client.bank = "new-project";
+      expect((await submit("继续")).context).toContain(MEMORY_EVIDENCE_GUIDE);
+      cfg = resolveConfig({ bankResolution: "registry", toolGuideExtra: "Changed team rule" });
+      const changed = await submit("继续");
+      expect(changed.context).toContain("Changed team rule");
+      expect(changed.context).toContain(MEMORY_EVIDENCE_GUIDE);
+      const subsequent = await submit("继续");
+      expect(subsequent.context).toContain("Changed team rule");
+      expect(subsequent.context).not.toContain("Shared memory summary instruction");
+      for (const method of [
+        "reflect",
+        "listPages",
+        "searchKnowledgePages",
+        "recallObservations",
+      ] as const)
+        expect(client[method]).not.toHaveBeenCalled();
+    }
+  );
+
   it("turn 1: injects the reflect answer wrapped in the system-injection preamble", async () => {
     const cfg = resolveConfig({});
     const client = makeClient();

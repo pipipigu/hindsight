@@ -164,6 +164,8 @@ describe("long-lived hosts build their client through the shared factory", () =>
     "core/session-start.ts": "one-shot hook process, same",
     "status.ts": "one-shot CLI resolving config from --config/--harness, not from a workspace",
     "deepen.ts": "one-shot CLI, same",
+    "remote/tools.ts":
+      "authenticated HTTP request factory: remote identity and explicit bank replace local workspace resolution",
   };
 
   function sourceFiles(dir: string, prefix = ""): string[] {

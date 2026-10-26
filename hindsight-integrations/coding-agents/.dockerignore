@@ -1,0 +1,6 @@
+**
+!dist/
+!dist/mcp-http-server.js
+!deploy/
+!deploy/remote/
+!deploy/remote/Dockerfile

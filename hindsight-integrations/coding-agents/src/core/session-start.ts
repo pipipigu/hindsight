@@ -1,3 +1,9 @@
+import { memoryAccessFor, READ_ONLY_MEMORY_GUIDANCE } from "./memory-access";
+import { fetchRemoteRules } from "./remote-mcp-bridge";
+import { projectDiagnostic } from "./project-diagnostics";
+import { permissionMode } from "./tool-context";
+import { buildMemoryQueryGuide } from "./recall-guidance";
+import { buildPageTrigger } from "./missions";
 /**
  * Shared `SessionStart` lifecycle: deterministically auto-seeds a cold repo's bank from its git
  * history (in the background, non-blocking), keeps warm banks deepening on every start, and
@@ -228,7 +234,8 @@ export async function buildSessionStartContext(args: {
   // The knowledge preamble is model context and stays in `additionalContext`.
   let systemMessage: string | undefined;
 
-  if (cfg.autoSeed !== false) {
+  // A hook process can inherit the same read-only authority as a persistent-plugin child.
+  if (memoryAccessFor() !== "read-only" && cfg.autoSeed !== false) {
     if (hasGit(cwd)) {
       // The LIVE bank is the ONLY state (cold-check-wins): delete the bank and the next session is
       // a true first-open — no client-side flags can contradict it. Opting out of memory is the
@@ -343,20 +350,30 @@ export async function buildSessionStartContext(args: {
   }
 
   let pages: PageRef[] = [];
-  try {
-    pages = parsePageList(await client.listPages());
-  } catch {
-    if (client.knowledgePagesSupported === false) {
-      diag(harness, "knowledge_pages_unavailable", { bank: bankId });
+  let pageListKnown = false;
+  const queryOnly = cfg.bankResolution === "registry" && cfg.autoInject === "none";
+  const rosterNeeded =
+    cfg.bankResolution !== "registry" || (!queryOnly && cfg.autoInject !== "recall");
+  if (rosterNeeded)
+    try {
+      pages = parsePageList(await client.listPages());
+      pageListKnown = true;
+    } catch {
+      if (client.knowledgePagesSupported === false) {
+        diag(harness, "knowledge_pages_unavailable", { bank: bankId });
+      }
+      /* fail-open preamble; preserve first-prompt reflect eligibility on a transient outage */
     }
-    /* fail-open preamble */
-  }
-  const additionalContext = buildKnowledgePreamble(pages, {
-    reflectOnNewGoals: cfg.autoInject !== "reflect",
-    extra: cfg.toolGuideExtra,
-  });
-  // An empty page roster is NOT an empty bank: a bank with memories and no pages still answers a
-  // reflect (#5209), so only the confirmed-empty probe above defers it.
+  const additionalContext = queryOnly
+    ? buildMemoryQueryGuide(bankId, cfg.toolGuideExtra)
+    : rosterNeeded
+      ? buildKnowledgePreamble(pages, {
+          reflectOnNewGoals: cfg.autoInject !== "reflect",
+          extra: cfg.toolGuideExtra,
+        })
+      : undefined;
+  // Only a server-confirmed empty bank defers the first-prompt reflect (#5209); a cold repo can
+  // still sit in a bank that already holds memories.
   const deferInitialReflect = bankEmpty;
 
   // The banner shows on EVERY session — Hindsight's presence is part of the product, not a
@@ -385,9 +402,22 @@ export async function buildSessionStartContext(args: {
   }
 
   // ALWAYS record the session start (warm sessions used to log nothing — undebuggable).
-  diag(harness, "session_start", { bank: bankId, cold, pages: pages.length, ms: Date.now() - t0 });
+  diag(harness, "session_start", {
+    bank: bankId,
+    cold,
+    ...(rosterNeeded ? { pages: pages.length } : {}),
+    rosterFetched: rosterNeeded,
+    ms: Date.now() - t0,
+  });
 
-  return { systemMessage, additionalContext, deferInitialReflect };
+  return {
+    systemMessage,
+    additionalContext:
+      memoryAccessFor() === "read-only"
+        ? [additionalContext, READ_ONLY_MEMORY_GUIDANCE].filter(Boolean).join("\n")
+        : additionalContext,
+    deferInitialReflect,
+  };
 }
 
 /** Run one SessionStart hook invocation: stdin event in, (maybe) an additionalContext object on stdout. */
@@ -412,6 +442,36 @@ export async function runSessionStartHook(
 
     let cfg = loadConfig({ harness });
     setLogLevel(cfg.logLevel);
+    if (cfg.remoteMcpConfigFile) {
+      if (cfg.disabled) return;
+      try {
+        const rules = await fetchRemoteRules(harness, cwd);
+        if (rules)
+          process.stdout.write(
+            JSON.stringify(
+              spec.emit({
+                additionalContext: [
+                  rules,
+                  memoryAccessFor() === "read-only" ? READ_ONLY_MEMORY_GUIDANCE : "",
+                ]
+                  .filter(Boolean)
+                  .join("\n"),
+              })
+            )
+          );
+      } catch (error) {
+        const { code, stage } = projectDiagnostic(error, "remote_mcp_connection_failed");
+        diag(harness, "remote_rules_failed", { code, stage });
+        process.stdout.write(
+          JSON.stringify(
+            spec.emit({
+              systemMessage: `NAS MCP rules unavailable: ${code} (${stage}); memory tools have no local fallback.`,
+            })
+          )
+        );
+      }
+      return;
+    }
     syncCompanionSkill(harness); // keep the installed skill current with the package version
     if (cfg.disabled) return;
     // …and keep the package itself current. AFTER the disabled check, unlike the skill sync above:
@@ -438,6 +498,14 @@ export async function runSessionStartHook(
     // cold one keeps coming up in the background and is picked up by a later turn.
     await ensureDaemon(cfg, harness, { waitMs: DAEMON_WAIT_SESSION_START_MS });
     const client = makeClient({
+      registryBinding:
+        cfg.bankResolution === "registry"
+          ? {
+              directory: cwd,
+              file: cfg.projectRegistryFile,
+              networkConfigured: cfg.networkConfigured,
+            }
+          : undefined,
       apiUrl: cfg.apiUrl,
       apiToken: cfg.apiToken,
       bank: bankId,
@@ -445,6 +513,14 @@ export async function runSessionStartHook(
       observationScopes: cfg.observationScopes,
     });
 
+    if (
+      memoryAccessFor() !== "read-only" &&
+      cfg.bankResolution === "registry" &&
+      permissionMode(ev.permission_mode) === "normal" &&
+      client instanceof HindsightClient
+    ) {
+      await client.seedPages(buildPageTrigger(cfg), cfg.pages, cfg.customPages).catch(() => {});
+    }
     const out = await buildSessionStartContext({ cwd, sessionRoot, bankId, cfg, client, harness });
     // The registration's banner hint (e.g. TraeCode's workspace-MCP gate) rides the same
     // user-facing message as the legacy-plugin warning — the banner is the only visible channel.

@@ -1,3 +1,4 @@
+import { memoryAccessFor } from "./memory-access";
 /**
  * Shared runtime for the Claude Code `Stop` hook: when a session ends, read its transcript,
  * normalize it, and write it back into the bank so the session compounds into memory. The retain
@@ -183,7 +184,7 @@ export async function runRetainHook(
 ): Promise<void> {
   // Anti-recursion: the codebase survey's own headless claude session (core/survey.ts) sets this
   // so its hooks are a no-op — it must not retain its own survey session's transcript.
-  if (process.env.HINDSIGHT_DISABLE_HOOKS) return;
+  if (process.env.HINDSIGHT_DISABLE_HOOKS || memoryAccessFor() === "read-only") return;
   // The host started counting when it spawned us, which is near enough to now: everything above
   // is synchronous. A margin keeps the kill from landing between our last wait and its response.
   const hostDeadline = Date.now() + spec.hostTimeoutSec * 1000 - HOST_DEADLINE_MARGIN_MS;
@@ -199,7 +200,7 @@ export async function runRetainHook(
 
   let cfg = loadConfig({ harness: spec.harness });
   setLogLevel(cfg.logLevel);
-  if (cfg.disabled) return;
+  if (cfg.disabled || cfg.remoteMcpConfigFile) return;
 
   // A journal harness closes the turn HERE, at the first point past the kill switch: the host's
   // copy of the reply is ephemeral (ZCode deletes its Stop transcript the moment this hook
@@ -225,7 +226,7 @@ export async function runRetainHook(
   const resolved = applyBankConfig(cfg, derived, cwd);
   cfg = resolved.cfg;
   const bankId = resolved.bankId;
-  if (cfg.disabled) return; // per-bank opt-out (banks.<id> override)
+  if (cfg.disabled || cfg.remoteMcpConfigFile) return; // per-bank opt-out (banks.<id> override)
   // Checked only HERE, after the bank is resolved, so a `banks.<id>` section can turn write-back
   // back on for one repo under a global `retainSessions: false` (and vice versa). Before the
   // daemon start below: a session that writes nothing has no reason to bring a server up. It still
@@ -241,6 +242,14 @@ export async function runRetainHook(
     // produces the same `retain_failed` diagnostic as an unreachable Cloud/self-hosted server.
     await ensureDaemon(cfg, spec.harness, { waitMs: DAEMON_WAIT_RETAIN_MS });
     client = makeClient({
+      registryBinding:
+        cfg.bankResolution === "registry"
+          ? {
+              directory: cwd,
+              file: cfg.projectRegistryFile,
+              networkConfigured: cfg.networkConfigured,
+            }
+          : undefined,
       apiUrl: cfg.apiUrl,
       apiToken: cfg.apiToken,
       bank: bankId,

@@ -2,6 +2,9 @@ import { defineConfig } from "tsup";
 
 export default defineConfig({
   entry: {
+    "shared-context-hook": "src/shared-context-hook.ts",
+    "project-registry": "src/project-registry.ts",
+    "project-admin": "src/project-admin.ts",
     index: "src/index.ts",
     // opencode v2 (`opencode2`) loads this via the package's root index.js, which re-exports it.
     // Its plugin contract shares nothing with v1's, so it is a separate entry — see src/opencode2.ts.
@@ -72,13 +75,19 @@ export default defineConfig({
     // Spawned DETACHED to hold the codebase-survey lease for the survey agent's lifetime.
     "survey-supervisor": "src/survey-supervisor.ts",
     "mcp-server": "src/mcp-server.ts",
+    "mcp-http-server": "src/mcp-http-server.ts",
     "hindsight-seed": "src/hindsight-seed.ts",
   },
   format: ["esm"],
-  target: "node18",
+  target: "node24",
+  removeNodeProtocol: false,
   clean: true,
   dts: { entry: "src/index.ts" },
-  shims: false,
+  // Bundled Undici uses CommonJS requires for Node built-ins inside standalone ESM bins.
+  shims: true,
+  banner: {
+    js: 'import { createRequire as createHindsightRequire } from "node:module";\nconst require = createHindsightRequire(import.meta.url);',
+  },
   // Each bin entry (claude-hook.js, cursor-hook.js, codex-hook.js, deepen.js, status.js, mcp-server.js,
   // hindsight-seed.js) must be a single self-contained file: hosts wire a hook by absolute path to
   // ONE dist file and never load the rest of the package, so shared code can't live in a separate
@@ -100,5 +109,9 @@ export default defineConfig({
     /^jsonc-parser/,
     // smol-toml likewise: installer.js parses ~/.grok/config.toml with it.
     /^smol-toml/,
+    // Explicit query budgets must also work from single-file hook/MCP installations.
+    /^js-tiktoken/,
+    // Private NAS routing uses a per-call dispatcher in single-file installations too.
+    /^undici/,
   ],
 });

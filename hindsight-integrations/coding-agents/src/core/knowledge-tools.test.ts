@@ -28,6 +28,9 @@ function findTool(tools: ReturnType<typeof buildKnowledgeTools>, name: string) {
 const EXPECTED_TOOLS = [
   "hindsight_sync_status",
   "hindsight_diagnose",
+  "hindsight_search_observations",
+  "hindsight_recall",
+  "hindsight_read_memory",
   "hindsight_search_knowledge_pages",
   "hindsight_list_knowledge_pages",
   "hindsight_read_knowledge_page",
@@ -37,7 +40,7 @@ const EXPECTED_TOOLS = [
 ];
 
 describe("buildKnowledgeTools", () => {
-  it("returns exactly the eight expected tools (as a set)", () => {
+  it("returns exactly the expected tools (as a set)", () => {
     const client = stubClient();
     const tools = buildKnowledgeTools(client, "repo-a");
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOLS].sort());
@@ -109,7 +112,11 @@ describe("buildKnowledgeTools", () => {
       const tool = findTool(tools, "hindsight_sync_status");
       const result = await tool.handler({});
       expect(result.isError).toBe(true);
-      expect(JSON.parse(result.content[0].text)).toEqual({ error: "server down" });
+      expect(JSON.parse(result.content[0].text)).toEqual({
+        error: "memory_request_failed",
+        code: "memory_request_failed",
+        stage: "request",
+      });
     } finally {
       rmSync(repoDir, { recursive: true, force: true });
     }
@@ -210,7 +217,10 @@ describe("buildKnowledgeTools", () => {
     );
     const result = await tool.handler({ query: "x" });
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("search down");
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      code: "memory_request_failed",
+      stage: "request",
+    });
   });
 
   it("hindsight_list_knowledge_pages calls client.listPages() with no args", async () => {
@@ -446,7 +456,7 @@ describe("buildKnowledgeTools", () => {
     "hindsight_capture_initiative",
     "hindsight_ingest_document",
   ] as const) {
-    it(`${name} returns isError:true with the error text when the client method throws`, async () => {
+    it(`${name} returns a safe error when the client method throws`, async () => {
       const boom = new Error("boom: not found");
       const client = stubClient({
         listPages: vi.fn(async () => {
@@ -479,7 +489,11 @@ describe("buildKnowledgeTools", () => {
                 : {};
       const result = await tool.handler(args);
       expect(result.isError).toBe(true);
-      expect(JSON.parse(result.content[0].text)).toEqual({ error: "boom: not found" });
+      expect(JSON.parse(result.content[0].text)).toEqual({
+        error: "memory_request_failed",
+        code: "memory_request_failed",
+        stage: "request",
+      });
     });
   }
 });

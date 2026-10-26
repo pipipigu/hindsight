@@ -1,3 +1,4 @@
+import { permissionMode, type PermissionMode } from "../core/tool-context";
 /**
  * Shared entrypoint factory for the pi-family EXTENSION hosts (pi and its fork Prime Agent).
  *
@@ -56,6 +57,7 @@ interface SessionManagerLike {
 interface ExtensionContext {
   /** The session's working directory. Optional so a host without it falls back to the process cwd. */
   cwd?: string;
+  permissionMode?: unknown;
   sessionManager: SessionManagerLike;
 }
 
@@ -70,7 +72,7 @@ interface ToolDefinition {
   execute(
     toolCallId: string,
     params: Record<string, unknown>,
-    signal?: unknown,
+    signal?: AbortSignal,
     onUpdate?: unknown,
     ctx?: ExtensionContext
   ): Promise<{ content: { type: "text"; text: string }[]; details: unknown }>;
@@ -78,6 +80,13 @@ interface ToolDefinition {
 
 interface ExtensionAPI {
   on(event: "session_start", handler: (event: unknown, ctx: ExtensionContext) => void): void;
+  registerCommand?(
+    name: string,
+    command: {
+      description: string;
+      handler: (args: string, ctx: ExtensionContext) => Promise<void> | void;
+    }
+  ): void;
   on(
     event: "before_agent_start",
     handler: (
@@ -109,7 +118,8 @@ export type ExtensionFactory = (pi: ExtensionAPI) => void;
  */
 export function toPiTool(
   spec: ToolSpec,
-  bind: (ctx: ExtensionContext | undefined) => ToolSpec | undefined = () => spec
+  bind: (ctx: ExtensionContext | undefined) => ToolSpec | undefined = () => spec,
+  modeFor?: (ctx?: ExtensionContext) => PermissionMode
 ): ToolDefinition {
   const parameters = z.toJSONSchema(z.object(spec.inputSchema)) as JsonSchema;
   return {
@@ -123,7 +133,9 @@ export function toPiTool(
         const text = "Hindsight memory is disabled for this workspace.";
         return { content: [{ type: "text", text }], details: null };
       }
-      const r = await bound.handler(params);
+      const r = modeFor
+        ? await bound.handler(params, { permission: modeFor(ctx) })
+        : await bound.handler(params);
       const text = r.content?.map((c) => c.text).join("\n") || "";
       return { content: [{ type: "text", text }], details: null };
     },
@@ -189,6 +201,7 @@ function createRuntime(harness: string, repoPath: string): RuntimeCore | undefin
 }
 
 interface PiWorkspace {
+  core: RuntimeCore;
   hooks: ReturnType<typeof createPiHooks>;
   tools: ToolSpec[];
 }
@@ -224,10 +237,24 @@ export function createPiExtension(
       // Fire-and-forget cold seed (bank check + background git seed); the workspace's first
       // before_agent_start awaits it via createPiHooks.
       const ws = core
-        ? { hooks: createPiHooks(core, harness, core.seedIfCold(dir)), tools: core.toolSpecs() }
+        ? {
+            core,
+            hooks: createPiHooks(core, harness, core.seedIfCold(dir)),
+            tools: core.toolSpecs(),
+          }
         : null;
       workspaces.set(dir, ws);
       return ws ?? undefined;
+    };
+
+    const permissions = new Map<string, PermissionMode>();
+    const modeFor = (ctx?: ExtensionContext): PermissionMode => {
+      const native = permissionMode(ctx?.permissionMode);
+      return native !== "unknown"
+        ? native
+        : ctx
+          ? (permissions.get(ctx.sessionManager.getSessionId()) ?? "unknown")
+          : "unknown";
     };
 
     let toolsRegistered = false;
@@ -237,11 +264,26 @@ export function createPiExtension(
         toolsRegistered = true;
         for (const spec of ws.tools)
           pi.registerTool(
-            toPiTool(spec, (c) => workspaceFor(dirOf(c))?.tools.find((t) => t.name === spec.name))
+            toPiTool(
+              spec,
+              (c) => workspaceFor(dirOf(c))?.tools.find((t) => t.name === spec.name),
+              modeFor
+            )
           );
       }
       return ws;
     };
+
+    pi.registerCommand?.("hindsight-mode", {
+      description:
+        "Declare normal or plan memory permissions for this session; unknown stays read-only",
+      handler: async (args, ctx) => {
+        const mode = permissionMode(args.trim());
+        if (mode === "unknown") throw new Error("Use /hindsight-mode normal|plan");
+        permissions.set(ctx.sessionManager.getSessionId(), mode);
+        await workspaceFor(dirOf(ctx))?.core.prepareSharedPages(mode);
+      },
+    });
 
     at(undefined); // the launch directory: the CLI's session
     pi.on("session_start", (_event, ctx) => {
@@ -260,6 +302,7 @@ export function createPiExtension(
     // Every workspace this process served may still have a write-back in flight.
     pi.on("session_shutdown", async () => {
       await Promise.all([...workspaces.values()].map((ws) => ws?.hooks.sessionShutdown()));
+      for (const ws of workspaces.values()) ws?.core.dispose();
     });
   };
 }

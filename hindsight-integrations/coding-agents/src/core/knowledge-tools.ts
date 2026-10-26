@@ -1,3 +1,22 @@
+import { assertCanWrite, type PermissionMode } from "./tool-context";
+import { saveConclusion, conclusionStatus, CONCLUSION_GUIDE } from "./conclusions";
+import { MEMORY_EVIDENCE_GUIDE } from "./recall-guidance";
+import { GUIDANCE_VERSION, RECALL_DEFAULT_TYPES_MODE } from "./recall-policy";
+import {
+  recallQueryShape,
+  observationsQueryShape,
+  parseRecallQuery,
+  sanitizeRecallResponse,
+  recallOutputFormat,
+  type RecallView,
+} from "./recall-query";
+import { formatRecallResponse } from "./recall-output";
+import {
+  boundedRecallResponse,
+  boundedMemoryRead,
+  boundedKnowledgeRead,
+  boundedKnowledgeSearch,
+} from "./recall-budget";
 /**
  * Knowledge-page MCP tool specs — runtime SDK-free so this stays unit-testable without a real MCP
  * host.
@@ -25,7 +44,7 @@ import type { HindsightClient } from "./hindsight";
 import { syncStatus } from "./status";
 import { applyBankConfig, DEFAULT_REFLECT_TOOL_TIMEOUT_MS, loadConfig } from "./config";
 import { diagFilePath } from "./diag";
-import { describeError } from "./log";
+import { projectErrorResult } from "./project-diagnostics";
 import type { RetainStamp } from "./retain-stamp";
 import type { PageTrigger } from "./missions";
 
@@ -68,8 +87,8 @@ const CREDIT_REMINDER =
   "reply — quoted, paraphrased, or merely confirming what you were going to say — open that part " +
   'with "> 🧠 **From Hindsight memory (<page>)** — <the specific facts you drew on>". Rewriting a ' +
   "snippet in your own words does not make it yours. If none of them bear on the turn, ignore them " +
-  "silently — an unhelpful search needs no mention. These are past records: check a claim that " +
-  "something was fixed or works against the code before relying on it.";
+  "silently — an unhelpful search needs no mention. " +
+  MEMORY_EVIDENCE_GUIDE;
 
 export interface ToolSpec {
   name: string;
@@ -86,16 +105,64 @@ export interface ToolSpec {
    * NON_DESTRUCTIVE_WRITE_ANNOTATIONS so clients still gate them, but for the right reason.
    */
   annotations: ToolSafetyAnnotations;
-  handler: (args: any) => Promise<ToolResult>;
+  handler: (args: any, context?: { permission: PermissionMode }) => Promise<ToolResult>;
 }
 
-function ok(value: unknown): ToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
+function ok(value: unknown, compact = false): ToolResult {
+  return {
+    content: [{ type: "text", text: JSON.stringify(value, null, compact ? undefined : 2) }],
+  };
 }
+
+const memoryReadShape = {
+  memory_id: z
+    .string()
+    .uuid()
+    .describe("Memory ID returned by search or its source IDs; bank is host-bound"),
+  section: z
+    .enum(["fact", "original", "provenance"])
+    .optional()
+    .describe(
+      "Default fact; original reads only this fact's source chunk; provenance reads complete source/evidence metadata"
+    ),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe("Unicode code-point offset from next_offset; default 0"),
+  content_hash: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional()
+    .describe(
+      "Required for continuation; copy the previous page's content_hash. Changed evidence requires restarting at offset 0"
+    ),
+  output_tokens: z
+    .number()
+    .int()
+    .min(1024)
+    .max(3000)
+    .optional()
+    .describe("Whole JSON token estimate (segmented cl100k_base); default 3000"),
+};
+const publicReadError =
+  /^(memory_not_found|memory_original_unavailable|memory_changed_restart_read|memory_output_budget_exceeded|invalid_memory_offset)$/;
+const pageReadShape = {
+  page_id: z.string().min(1).max(256),
+  part: z
+    .enum(["body", "metadata"])
+    .optional()
+    .describe("Default body; metadata reads the description/generation prompt only when needed"),
+  offset: memoryReadShape.offset,
+  content_hash: memoryReadShape.content_hash,
+  output_tokens: memoryReadShape.output_tokens,
+};
 
 function err(e: unknown): ToolResult {
-  const message = describeError(e);
-  return { content: [{ type: "text", text: JSON.stringify({ error: message }) }], isError: true };
+  if (e instanceof Error && publicReadError.test(e.message))
+    return { isError: true, content: [{ type: "text", text: e.message }] };
+  return projectErrorResult(e);
 }
 
 /** Wrap a handler body so a thrown client error always becomes an isError:true result, never a throw. */
@@ -131,7 +198,7 @@ export function buildKnowledgeTools(
 ): ToolSpec[] {
   const extra = opts.toolGuideExtra?.trim();
   const crediting = extra ? `${CREDIT_REMINDER} ${extra}` : CREDIT_REMINDER;
-  return [
+  const tools: ToolSpec[] = [
     {
       name: "hindsight_sync_status",
       description:
@@ -201,16 +268,90 @@ export function buildKnowledgeTools(
         });
       },
     },
+    ...(
+      [
+        ["hindsight_search_observations", true],
+        ["hindsight_recall", false],
+      ] as const
+    ).map(
+      ([name, observations]): ToolSpec => ({
+        name,
+        description:
+          (observations
+            ? "Search consolidated observations for summarized experience or rules in the current project, including their supporting facts by default. "
+            : "For concrete facts, prefer this tool: recall factual memories and experiences in the current project using the same API as the web Recall analyzer. ") +
+          (!observations && GUIDANCE_VERSION === "v4"
+            ? (RECALL_DEFAULT_TYPES_MODE === "new"
+                ? "默认纳入融合观察和原始事实检索，"
+                : "默认只检索原始事实；现状核对可传 types=null 纳入观察，") +
+              '回答现状前须相互核对；证据不足时按需补查相关事实或观察。只看原始事实或问历史时，可传 types=["world","experience"]。 '
+            : "") +
+          "Default compact output returns up to 5 complete ranked facts within a 3000-token estimate for the WHOLE JSON, including sources (segmented cl100k_base, provider usage differs). omitted_count counts fetched facts not shown; requires_read is an address, not evidence. Use hindsight_read_memory for a specific fact/original, instead of increasing max_tokens or requesting many chunks. seen_ids omits text already visible in this conversation; references are recoverable via read_memory. Stop when evidence suffices; further queries must address a specific gap. Raw/trace output is unbounded and only for an explicitly requested detailed/debug inspection. F/C references resolve through sources/chunks; source_ids identifies missing supporting facts. max_tokens controls server text, not the whole output.",
+        inputSchema: observations ? observationsQueryShape : recallQueryShape,
+        annotations: READ_ONLY_ANNOTATIONS,
+        handler: async (args: unknown) => {
+          try {
+            const query = parseRecallQuery(args, observations);
+            const identity = client.scopeIdentity;
+            const result = sanitizeRecallResponse(
+              await client.queryMemories(query),
+              client.apiToken
+            ) as Record<string, unknown>;
+            const format = recallOutputFormat(args);
+            const output = ok(
+              format === "compact"
+                ? boundedRecallResponse(result, args as RecallView, query.include?.entities != null)
+                : formatRecallResponse(result, "raw"),
+              format === "compact"
+            );
+            if (
+              (client.registryBinding || client.remoteBinding) &&
+              client.scopeIdentity !== identity
+            )
+              throw new Error("project_scope_changed");
+            return output;
+          } catch (e) {
+            return err(e);
+          }
+        },
+      })
+    ),
+    {
+      name: "hindsight_read_memory",
+      description:
+        "Read one searched memory by ID, or section=original for only its own source chunk. Returns bounded evidence with provenance and curation state. Long text is explicitly paged: continue with next_offset and content_hash; never treat an incomplete page as the whole fact. If provenance_omitted, read section=provenance. Use source_ids to read missing supporting facts. Works after restart without a query cache. This is a read, allowed in plan mode.",
+      inputSchema: memoryReadShape,
+      annotations: READ_ONLY_ANNOTATIONS,
+      handler: async (args: unknown) => {
+        try {
+          const view = z.object(memoryReadShape).strict().parse(args);
+          if ((view.offset ?? 0) > 0 && !view.content_hash)
+            throw new Error("memory_changed_restart_read");
+          const identity = client.scopeIdentity;
+          const data = sanitizeRecallResponse(
+            await client.readMemory(view.memory_id, view.section === "original"),
+            client.apiToken
+          ) as Awaited<ReturnType<HindsightClient["readMemory"]>>;
+          const output = ok(boundedMemoryRead(data.memory, data.original, view, identity), true);
+          if ((client.registryBinding || client.remoteBinding) && client.scopeIdentity !== identity)
+            throw new Error("project_scope_changed");
+          return output;
+        } catch (e) {
+          return err(e);
+        }
+      },
+    },
     {
       name: "hindsight_search_knowledge_pages",
       description:
         "Search this repository's Hindsight knowledge pages for content relevant to a query — " +
         "hybrid full-text + semantic search, server-side. Call this when the user's question may " +
         "be answered by the project's accumulated knowledge (architecture, conventions, decisions, " +
-        "initiatives) rather than by reading code. Returns ranked pages with a relevance snippet; " +
+        "initiatives). Choose this for project overviews or topics; concrete facts can go directly " +
+        "to hindsight_recall. Stop when evidence is sufficient. Returns ranked pages with a relevance snippet; " +
         // Same sentence the payload carries, from the same constant: two copies of a rule this
         // fiddly drift apart, and the description is what a host shows when the tool is listed.
-        "read a full page with hindsight_read_knowledge_page. " +
+        "read relevant missing evidence with hindsight_read_knowledge_page. Ranked snippets are limited to 5 pages within a whole-response budget; long generation descriptions are available via part=metadata. " +
         crediting,
       inputSchema: { query: z.string().describe("what to look for") },
       annotations: READ_ONLY_ANNOTATIONS,
@@ -218,6 +359,7 @@ export function buildKnowledgeTools(
         try {
           // Limit comes from the client (`pageSearchLimit`), so the tool and the hook's injection
           // can never drift apart — this used to pass its own literal 3.
+          const identity = client.scopeIdentity;
           const hits = await client.searchKnowledgePages(args.query);
           // No `score`. The server fuses BM25 and vector search with reciprocal rank fusion, so the
           // number is ~1/(60+rank) summed over two retrievers: a perfect top hit scores about 0.03
@@ -229,17 +371,26 @@ export function buildKnowledgeTools(
           // and credited nothing — then credited correctly the moment the user asked "where did you
           // see that?". The guide had scrolled far up the context by then; the instruction that
           // lands at the same moment as the results is the one that can still be acted on.
-          return ok({
-            pages: hits.map((h) => ({
-              page: h.name,
-              page_id: h.id,
-              // The question the page answers — the same `description` the list and read tools
-              // carry, so a hit says what the page is FOR, not just how it opens.
-              ...(h.source_query ? { description: h.source_query } : {}),
-              snippet: h.snippet,
-            })),
-            crediting,
-          });
+          const pages = hits.map((h) => ({
+            page: h.name,
+            page_id: h.id,
+            // The question the page answers — the same `description` the list and read tools
+            // carry, so a hit says what the page is FOR, not just how it opens.
+            ...(h.source_query && Array.from(h.source_query).length <= 200
+              ? { description: h.source_query }
+              : {}),
+            snippet: h.snippet,
+          }));
+          const output = ok(
+            boundedKnowledgeSearch(
+              sanitizeRecallResponse(pages, client.apiToken) as Record<string, unknown>[],
+              crediting
+            ),
+            true
+          );
+          if ((client.registryBinding || client.remoteBinding) && client.scopeIdentity !== identity)
+            throw new Error("project_scope_changed");
+          return output;
         } catch (e) {
           return err(e);
         }
@@ -251,9 +402,9 @@ export function buildKnowledgeTools(
         "List this repository's Hindsight knowledge pages — curated, continuously-updated " +
         "summaries of the project's durable knowledge (architecture, components, conventions, key " +
         "decisions, and in-flight initiatives). Returns each page's id, title, and a one-line " +
-        "description of what it covers. Call this at the start of any non-trivial task, and again " +
-        "periodically in long sessions, to see what the project already knows before you read code " +
-        "or ask the user. The list changes as work is captured, so re-check it occasionally.",
+        "description of what it covers. Use when the question is about the page catalog; a normal " +
+        "project question should go directly to the appropriate search tool. Listing is not a " +
+        "prerequisite for recall or reflect.",
       inputSchema: {},
       annotations: READ_ONLY_ANNOTATIONS,
       handler: guarded(async () => client.listPages()),
@@ -261,15 +412,43 @@ export function buildKnowledgeTools(
     {
       name: "hindsight_read_knowledge_page",
       description:
-        "Read the full content of one knowledge page by its id (from " +
-        "hindsight_list_knowledge_pages). Call this whenever a listed page is relevant to what " +
-        "you're about to do — e.g. read Conventions before writing new code, Component map before " +
-        "changing a subsystem, or an initiative's page before continuing that feature. A page may " +
-        "contain [[page:<id>]] links to related pages; follow one by calling this tool again with " +
-        "that id. Prefer reading a page over re-deriving the same understanding from source.",
-      inputSchema: { page_id: z.string() },
+        "Read one knowledge page by its id within a whole-response token budget (from " +
+        "hindsight_search_knowledge_pages or hindsight_list_knowledge_pages). Read only when the " +
+        "search snippet leaves a relevant evidence gap; stop when enough evidence is available. Long body text is paged by next_offset/content_hash; a partial body is not complete evidence. Description/generation metadata is available via part=metadata instead of being repeated with the body. " +
+        "Follow [[page:<id>]] links only if they resolve that gap. " +
+        MEMORY_EVIDENCE_GUIDE,
+      inputSchema: pageReadShape,
       annotations: READ_ONLY_ANNOTATIONS,
-      handler: guarded(async ({ page_id }) => client.getPage(page_id)),
+      handler: async (args: unknown) => {
+        try {
+          const view = z.object(pageReadShape).strict().parse(args);
+          if ((view.offset ?? 0) > 0 && !view.content_hash)
+            throw new Error("memory_changed_restart_read");
+          const identity = client.scopeIdentity;
+          const page = sanitizeRecallResponse(
+            await client.getPage(view.page_id),
+            client.apiToken
+          ) as Record<string, unknown>;
+          const out = ok(boundedKnowledgeRead(page, view, identity), true);
+          if ((client.registryBinding || client.remoteBinding) && client.scopeIdentity !== identity)
+            throw new Error("project_scope_changed");
+          return out;
+        } catch (e) {
+          if (!(e instanceof Error && publicReadError.test(e.message))) return err(e);
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text:
+                  e instanceof Error && publicReadError.test(e.message)
+                    ? e.message
+                    : "memory_request_failed",
+              },
+            ],
+          };
+        }
+      },
     },
     {
       name: "hindsight_reflect",
@@ -376,4 +555,59 @@ export function buildKnowledgeTools(
       }),
     },
   ];
+  if (!client.registryBinding && !client.remoteBinding) return tools;
+  tools.push({
+    name: "hindsight_save_conclusion",
+    description: CONCLUSION_GUIDE,
+    inputSchema: {
+      content: z.string().min(1).max(8000),
+      evidence: z.string().min(1).max(4000),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: async (args) => ok(await saveConclusion(client, args, opts.harness ?? "unknown")),
+  });
+  return tools.map((tool) => ({
+    ...tool,
+    description: tool.description
+      .replace(
+        "Ingestion is automatic and background",
+        "Conversation and Git capture are disabled by default; explicit submissions are background"
+      )
+      .replace(
+        "that's captured automatically at session end",
+        "automatic conversation capture is disabled; save durable conclusions with evidence"
+      ),
+    handler: async (args, context) => {
+      try {
+        if (!tool.annotations.readOnlyHint) {
+          assertCanWrite(context?.permission ?? "unknown");
+          client.remoteBinding?.assertWrite();
+        } else client.remoteBinding?.assertRead();
+        // Agent-supplied bank/directory overrides have no place in a project-bound tool.
+        if ("bank_id" in args || "bankId" in args || "cwd" in args)
+          throw new Error("project_override_denied");
+        if (tool.name === "hindsight_sync_status")
+          return ok({ bank: bankId, queue: conclusionStatus(client) });
+        const result = await tool.handler(args, context);
+        if (!result.isError) return result;
+        // Keep the established bounded-read error strings compatible with existing callers.
+        if (publicReadError.test(result.content[0]?.text ?? "")) return result;
+        // Inner handlers already encode diagnostics. Reclassify only their fixed error code.
+        let code: unknown;
+        try {
+          code = JSON.parse(result.content[0]?.text ?? "").error;
+        } catch {
+          code = result.content[0]?.text;
+        }
+        return projectErrorResult(code);
+      } catch (e) {
+        return projectErrorResult(e);
+      }
+    },
+  }));
 }
